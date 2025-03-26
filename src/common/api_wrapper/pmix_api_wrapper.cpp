@@ -19,17 +19,19 @@
 namespace ccl {
 
 #ifdef CCL_ENABLE_PMIX
-static pmix_proc_t global_proc;
+
+// this is not assumed to work with threads in parallel due to potential race conditions
+pmix_proc_t global_proc;
 
 ccl::lib_info_t pmix_lib_info;
 pmix_lib_ops_t pmix_lib_ops;
 
-bool get_pmix_local_coord(int *local_proc_idx, int *local_proc_count) {
+bool get_pmix_local_coord(int* local_proc_idx, int* local_proc_count) {
     *local_proc_idx = CCL_ENV_INT_NOT_SPECIFIED;
     *local_proc_count = CCL_ENV_INT_NOT_SPECIFIED;
 
     pmix_status_t rc = PMIX_SUCCESS;
-    pmix_value_t *val = NULL;
+    pmix_value_t* val = NULL;
     pmix_proc_t proc;
 
     if (PMIX_SUCCESS != (rc = PMIx_Init(&global_proc, NULL, 0))) {
@@ -87,7 +89,10 @@ void pmix_api_init() {
         }
         LOG_DEBUG("pmix lib path: ", pmix_lib_info.path);
 
-        load_library(pmix_lib_info);
+        int error = load_library(pmix_lib_info);
+        if (error != CCL_LOAD_LB_SUCCESS) {
+            print_error(error, pmix_lib_info);
+        }
 
         CCL_THROW_IF_NOT(pmix_lib_info.handle != nullptr, "could not initialize PMIX api");
     }

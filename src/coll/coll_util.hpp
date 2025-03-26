@@ -80,4 +80,7 @@ bool is_reduce_scatter_inplace(const void* send_buf,
                                const size_t rank,
                                const size_t comm_size);
 
+void enable_direct_fallback_for_pt2pt();
+void restore_pt2pt_fallback_table();
+
 } // namespace ccl

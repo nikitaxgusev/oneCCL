@@ -100,6 +100,10 @@ void CCL_API kvs::set(const string_class& key, const vector_class<char>& data) {
     pimpl->set(key, data);
 }
 
+int CCL_API kvs::get_id() {
+    return id;
+}
+
 static base_kvs_impl* get_kvs_impl(const kvs::address_type& addr, const kvs_attr& attr) {
 #ifdef CCL_ENABLE_STUB_BACKEND
     if (ccl::global_data::env().backend == backend_mode::stub) {
@@ -129,7 +133,8 @@ CCL_API const base_kvs_impl& kvs::get_impl() {
     return *pimpl;
 }
 
-CCL_API kvs::kvs(const kvs_attr& attr) : pimpl(get_kvs_impl(attr)) {}
+std::atomic<int> kvs::id_counter{ 0 };
+CCL_API kvs::kvs(const kvs_attr& attr) : pimpl(get_kvs_impl(attr)), id(id_counter++) {}
 
 CCL_API kvs::~kvs() {}
 

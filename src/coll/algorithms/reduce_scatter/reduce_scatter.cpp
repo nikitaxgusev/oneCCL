@@ -527,6 +527,7 @@ ccl::status ccl_coll_build_topo_reduce_scatter_fill(ccl_sched* sched,
         in_buffers.push_back({ tmp_write_buf.get_ptr(), ccl::ze::ipc_mem_type::memory });
         tmp_write_buf_idx = in_buffers.size() - 1;
     }
+    // tmp_bufs is used to store the output of the initial mdfi reduce
     std::vector<ccl_buffer> tmp_bufs;
     size_t tmp_buf_idx_start = -1;
     ccl_buffer tmp_buf;
@@ -537,6 +538,8 @@ ccl::status ccl_coll_build_topo_reduce_scatter_fill(ccl_sched* sched,
         if (!is_single_node) {
             // TODO: add device memory manager support or any mechanism that
             // allows to control the memory consumption once the pipleine chunking is implemented
+
+            // allocate buffer to rearrange input send_buf
             size_t tmp_buf_bytes = count * dtype.size();
             ccl::alloc_param alloc_param(
                 tmp_buf_bytes, ccl::buffer_type::ze, ccl::buffer_place::device);
@@ -546,34 +549,41 @@ ccl::status ccl_coll_build_topo_reduce_scatter_fill(ccl_sched* sched,
         }
     }
     else if (use_tmp_buf) {
+        // allocate buffer to rearrange input send_buf
         size_t tmp_buf_bytes = count * dtype.size();
-        // single-node non-fallback algo only needs temp buffer for a plane
+        // single-node non-fallback algo only needs temp buffer
+        // for a plane to do mdfi reduce and not for rearrranging
         if (use_non_fallback_algo && is_single_node) {
             tmp_buf_bytes /= pair_comm_size;
         }
+        // allocate buffer to write output of intial
+        // mdfi reduce in multi-node non-fallback.
+        // for single-node since we are not rearranging,
+        // we can use the already allocated tmp_buf_bytes.
+        // i.e. first part of the buffer is used for rearragnemnt
+        // and next part is used for mdfi reduce
+        size_t tmp_buf_offset_after_reorder = 0;
+        if (use_non_fallback_algo && !is_single_node) {
+            tmp_buf_offset_after_reorder = tmp_buf_bytes;
+            tmp_buf_bytes += (tmp_buf_bytes / pair_comm_size);
+        }
+
         ccl::alloc_param alloc_param(
             tmp_buf_bytes, ccl::buffer_type::ze, ccl::buffer_place::device);
         tmp_buf = sched->alloc_buffer(alloc_param);
 
         const size_t tmp_buf_size_per_rank = recv_count * r2r_comm_size * dtype.size();
         if (use_non_fallback_algo && !is_single_node) {
-            // plane 0 works on even partitions and plane 1 works on odd partitions of tmp_buf
-            tmp_bufs.push_back(tmp_buf + tmp_buf_size_per_rank * pair_comm->rank());
-
             // scaleout rearranges send_buf into tmp_buf and uses this rearranged buf as input
             in_buffers[0] = { tmp_buf.get_ptr(), ccl::ze::ipc_mem_type::memory }; // 0
         }
-        else {
-            tmp_bufs.push_back(tmp_buf);
-        }
+
+        // partition the tmp_buf to use for mdfi reduce
+        tmp_bufs.push_back(tmp_buf + tmp_buf_offset_after_reorder);
         tmp_buf_idx_start = in_buffers.size();
         in_buffers.push_back({ tmp_bufs.front().get_ptr(), ccl::ze::ipc_mem_type::memory }); // 2
-
-        // for scaleout, plane 0 works on even partitions and plane 1 works on odd partitions
-        // of tmp_buf and therefore we need to skip two partitions to reach the next one.
-        const size_t skip_multiplier = is_single_node ? 1 : pair_comm_size;
         for (int i = 0; i < even_comm_size - 1; i++) {
-            tmp_bufs.push_back(tmp_bufs.back() + tmp_buf_size_per_rank * skip_multiplier);
+            tmp_bufs.push_back(tmp_bufs.back() + tmp_buf_size_per_rank);
         }
     }
 
@@ -755,28 +765,6 @@ ccl::status ccl_coll_build_topo_reduce_scatter_fill(ccl_sched* sched,
         else if (even_comm_size > 1) {
             const size_t tmp_buf_count_per_rank = recv_count * r2r_comm_size;
             const size_t tmp_buf_size_per_rank = tmp_buf_count_per_rank * dtype.size();
-            if (!is_single_node) {
-                // plane 0 worked on even partitions and plane 1
-                // worked on odd partitions, but we need continous
-                // data for ze_a2a_reduce_scatter_entry and therefore
-                // we pack alternate paritions into continous data
-                std::vector<ze_event_handle_t> parallel_copy_events;
-                for (int even_comm_idx = 1; even_comm_idx < even_comm_size; even_comm_idx++) {
-                    copy_attr attr{};
-                    attr.direction = copy_direction::d2d;
-                    auto entry = entry_factory::create<ze_copy_entry>(
-                        sched,
-                        tmp_bufs[even_comm_idx],
-                        tmp_bufs.front() + even_comm_idx * tmp_buf_size_per_rank,
-                        tmp_buf_count_per_rank,
-                        dtype,
-                        attr,
-                        wait_events);
-                    parallel_copy_events.push_back(entry->entry_event);
-                }
-                ccl::add_comm_barrier(sched, even_comm, parallel_copy_events, out_event);
-                clear_and_push_back(wait_events, out_event);
-            }
 
             // perform xelink read and followed by reduce
             ccl_buffer src_send_buf = is_single_node ? send_buf : tmp_buf;

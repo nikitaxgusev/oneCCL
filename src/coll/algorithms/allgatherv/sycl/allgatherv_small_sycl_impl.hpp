@@ -45,21 +45,25 @@ void inline gather(const void* send,
                    std::array<void*, MAX_NODE_RANKS> in,
                    ccl_kernel_barrier_data kernel_barrier_data,
                    const ccl_comm_barrier_data comm_barrier_data,
-                   const size_t count,
+                   const size_t copy_count,
+                   const size_t main_count,
+                   const size_t last_count,
                    const sycl::nd_item<1> it) {
     const size_t idx = it.get_global_linear_id();
     using AT = sycl::vec<T, vec_size>;
 
-    const size_t packed_count = count / vec_size;
+    const size_t packed_copy_count = copy_count / vec_size;
+    const size_t packed_main_count = main_count / vec_size;
+    const size_t packed_last_count = last_count / vec_size;
 
     if (use_local_barrier) {
         // copy data from send buffer to tmp buffer
-        if (use_block && idx < packed_count) {
+        if (use_block && idx < packed_copy_count) {
             ((AT*)tmp)[idx] = ((AT*)send)[idx];
         }
         else {
-            const size_t new_idx = idx + (vec_size - 1) * packed_count;
-            if (new_idx < count) {
+            const size_t new_idx = idx + (vec_size - 1) * packed_copy_count;
+            if (new_idx < copy_count) {
                 ((T*)tmp)[new_idx] = ((T*)send)[new_idx];
             }
         }
@@ -78,13 +82,44 @@ void inline gather(const void* send,
         kernel_barrier_data.reset_sync_data();
     }
 
-    if (use_block && idx < packed_count) {
-        gather_kernel<AT, N>(out, in, idx);
+    // gather kernel
+    if (main_count == last_count) {
+        // default case, all counts are equal
+        if (use_block && idx < packed_main_count) {
+            gather_kernel<AT, N>(out, in, idx);
+        }
+        else {
+            const size_t new_idx = idx + (vec_size - 1) * packed_main_count;
+            if (new_idx < main_count) {
+                gather_kernel<T, N>(out, in, new_idx);
+            }
+        }
     }
     else {
-        const size_t new_idx = idx + (vec_size - 1) * packed_count;
-        if (new_idx < count) {
-            gather_kernel<T, N>(out, in, new_idx);
+        // special case, the last block is bigger.
+        // restrict the compilation for 1 rank case,
+        // it is handled ouside of the kernels
+        if constexpr (N > 1) {
+            // first N - 1 blocks
+            if (use_block && idx < packed_main_count) {
+                gather_kernel<AT, N - 1>(out, in, idx);
+            }
+            else {
+                const size_t new_idx = idx + (vec_size - 1) * packed_main_count;
+                if (new_idx < main_count) {
+                    gather_kernel<T, N - 1>(out, in, new_idx);
+                }
+            }
+        }
+        // last block
+        if (use_block && idx < packed_last_count) {
+            ((AT*)out[N - 1])[idx] = ((AT*)in[N - 1])[idx];
+        }
+        else {
+            const size_t new_idx = idx + (vec_size - 1) * packed_last_count;
+            if (new_idx < last_count) {
+                ((T*)out[N - 1])[new_idx] = ((T*)in[N - 1])[new_idx];
+            }
         }
     }
 }
@@ -96,6 +131,7 @@ ccl::event allgatherv_small_impl(const void* send_buf,
                                  size_t send_count,
                                  void* recv_buf,
                                  const ccl::vector_class<size_t>& recv_counts,
+                                 const ccl::vector_class<size_t>& offsets,
                                  ccl::datatype dtype,
                                  ccl_comm* comm,
                                  ccl_stream* global_stream,
@@ -106,12 +142,18 @@ ccl::event allgatherv_small_impl(const void* send_buf,
     auto ccl_dtype = ccl::global_data::get().dtypes->get(dtype);
     const size_t dsize = ccl_dtype.size();
 
-    const size_t count = send_count;
-
     // TODO: which communicator to use for scaleout
     std::shared_ptr<ccl_comm> node_comm = comm->get_node_comm();
     const int comm_size = node_comm->size();
     const int comm_rank = node_comm->rank();
+
+    // allgatherv kernels currently do not support variable counts.
+    // however, the last rank may have a different count, if allgather is called
+    // from allreduce collective for example.
+    // small allgaterv kernel handles this special case.
+    // use first element as a base count for checking hw sections.
+    const size_t count = recv_counts.front();
+    const size_t last_count = recv_counts.back();
 
     size_t hw_threads = get_total_threads(q);
 
@@ -141,7 +183,10 @@ ccl::event allgatherv_small_impl(const void* send_buf,
     auto gather_invoke = [=, &q]<int VS, int SGS, int LB, int GB>(std::vector<sycl::event> sycl_deps) {
         constexpr int use_block = 1;
         constexpr int vec_size = VS, wg_size = SGS, sg_size = SGS;
-        const size_t kernel_threads = count / vec_size + count % vec_size;
+        const size_t kernel_threads_copy = send_count / vec_size + send_count % vec_size;
+        const size_t kernel_threads_main = count / vec_size + count % vec_size;
+        const size_t kernel_threads_last = last_count / vec_size + last_count % vec_size;
+        const size_t kernel_threads = std::max({ kernel_threads_copy, kernel_threads_main, kernel_threads_last });
         const size_t kernel_size = ((kernel_threads + wg_size - 1) / wg_size) * wg_size;
 
         // total number of hw threads is a multiple of sub_group
@@ -161,10 +206,10 @@ ccl::event allgatherv_small_impl(const void* send_buf,
         std::array<void*, MAX_NODE_RANKS> out_ptrs;
         // TODO: is it better to only pass recv_buf to the kernel and do this calculation there
         for (int i = 0; i < comm_size; i++) {
-            out_ptrs[i] = (char*)recv_buf + i * count * dsize;
+            out_ptrs[i] = !offsets.empty() ? (char*)recv_buf + offsets[i] : (char*)recv_buf + i * count * dsize;
         }
 
-        ccl_kernel_barrier_data kernel_barrier_data = get_kernel_barrier_data().inc_slot();
+        ccl_kernel_barrier_data kernel_barrier_data = get_kernel_barrier_data(comm).inc_slot();
         // if global barrier is not used, then do not increment the barrier counter
         ccl_comm_barrier_data comm_barrier_data = GB ? node_comm->barrier_inc() : node_comm->barrier_data();
 
@@ -172,14 +217,16 @@ ccl::event allgatherv_small_impl(const void* send_buf,
             h.depends_on(sycl_deps);
             h.parallel_for(
                 sycl::nd_range<1>(kernel_size, wg_size),
-                [=](sycl::nd_item<1> it) [[intel::reqd_sub_group_size(sg_size)]] {
+                [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(sg_size)]] {
                     gather<T, N, VS, use_block, LB, GB>(send_buf,
                                                         local_tmp_buf,
                                                         out_ptrs,
                                                         remote_ptrs,
                                                         kernel_barrier_data,
                                                         comm_barrier_data,
+                                                        send_count,
                                                         count,
+                                                        last_count,
                                                         it);
                 });
         });
@@ -191,7 +238,7 @@ ccl::event allgatherv_small_impl(const void* send_buf,
     auto memcpy_gather = [=, &q]<int VS>() {
         sycl::event memcpy_event = q.submit([=](sycl::handler& h) {
             h.depends_on(dep_events);
-            h.memcpy(local_tmp_buf, send_buf, dsize * count);
+            h.memcpy(local_tmp_buf, send_buf, dsize * send_count);
         });
 
         sycl::event barrier_event = invoke_barrier(node_comm, q, { memcpy_event }, use_cpu_barrier);

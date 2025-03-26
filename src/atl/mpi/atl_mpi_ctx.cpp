@@ -332,10 +332,10 @@ int atl_mpi_ctx::bf16_init() {
     is_bf16_native = false;
 #endif /* MPIX_C_BF16 */
     if (env_mpi_bf16_native && !is_bf16_native) {
-        LOG_INFO("native Intel MPI BF16 is not available");
+        LOG_INFO_ROOT("native Intel MPI BF16 is not available");
     }
     if (is_bf16_native) {
-        LOG_INFO("native Intel MPI BF16 is enabled");
+        LOG_INFO_ROOT("native Intel MPI BF16 is enabled");
     }
     else {
         // create custom MPI BF16 dtype
@@ -441,10 +441,10 @@ int atl_mpi_ctx::fp16_init() {
     is_fp16_native = false;
 #endif /* MPIX_C_FLOAT16 */
     if (env_mpi_fp16_native && !is_fp16_native) {
-        LOG_INFO("native Intel MPI FP16 is not available");
+        LOG_INFO_ROOT("native Intel MPI FP16 is not available");
     }
     if (is_fp16_native) {
-        LOG_INFO("native Intel MPI FP16 is enabled");
+        LOG_INFO_ROOT("native Intel MPI FP16 is enabled");
     }
     else {
         // create custom MPI FP16 dtype
@@ -625,7 +625,18 @@ atl_status_t atl_mpi_ctx::set_impi_env(const atl_attr_t& attr, const atl_mpi_lib
 #endif // CCL_ENABLE_SYCL
 
     setenv("I_MPI_THREAD_SPLIT", "1", 0);
+#ifdef CCL_ENABLE_OMP
+    if (getenv("OMP_NUM_THREADS") != NULL) {
+        setenv("I_MPI_THREAD_RUNTIME", "openmp", 0);
+    }
+    // disable omp allreduce when OMP_NUM_THREADS is not specified
+    else {
+        setenv("I_MPI_THREAD_RUNTIME", "generic", 0);
+        ccl::global_data::env().enable_omp_allreduce = false;
+    }
+#else
     setenv("I_MPI_THREAD_RUNTIME", "generic", 0);
+#endif // CCL_ENABLE_OMP
     setenv("I_MPI_THREAD_MAX", ep_count_str, 0);
     setenv("I_MPI_THREAD_ID_KEY", EP_IDX_KEY, 0);
     setenv("I_MPI_THREAD_LOCK_LEVEL", (attr.in.ep_count == 1) ? "global" : "vci", 0);

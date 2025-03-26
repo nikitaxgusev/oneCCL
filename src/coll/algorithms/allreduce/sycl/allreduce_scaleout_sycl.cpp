@@ -18,19 +18,20 @@
 #if defined(CCL_ENABLE_ZE) || defined(CCL_ENABLE_SYCL)
 #include "coll/algorithms/allreduce/sycl/allreduce_sycl.hpp"
 #include "coll/algorithms/allreduce/sycl/allreduce_ring.hpp"
+#include "coll/algorithms/allreduce/sycl/allreduce_rabenseifner.hpp"
 #endif // defined(CCL_ENABLE_ZE) || defined(CCL_ENABLE_SYCL)
 
-ccl::event allreduce_scaleout_sycl_simple(sycl::queue& q,
-                                          const void* send_buf,
-                                          void* recv_buf,
-                                          size_t count,
-                                          ccl::datatype dtype,
-                                          ccl::reduction reduction,
-                                          ccl_comm* comm,
-                                          const ccl::vector_class<ccl::event>& deps,
-                                          bool& done,
-                                          bool copy_to_host,
-                                          bool is_cpu_buffers) {
+sycl::event allreduce_scaleout_sycl_simple(sycl::queue& q,
+                                           const void* send_buf,
+                                           void* recv_buf,
+                                           size_t count,
+                                           ccl::datatype dtype,
+                                           ccl::reduction reduction,
+                                           ccl_comm* comm,
+                                           const ccl::vector_class<ccl::event>& deps,
+                                           bool& done,
+                                           bool copy_to_host,
+                                           bool is_cpu_buffers) {
     sycl::event op_end, copy_e;
     std::shared_ptr<atl_base_comm> atl_comm = comm->get_atl_comm();
     auto ccl_dtype = ccl::global_data::get().dtypes->get(dtype);
@@ -46,7 +47,7 @@ ccl::event allreduce_scaleout_sycl_simple(sycl::queue& q,
                      count * ccl_dtype.size(),
                      " bytes. Falling back. TODO: chunking/pipelining");
             done = false;
-            ccl::event e;
+            sycl::event e;
             return e;
         }
 
@@ -109,7 +110,7 @@ ccl::event allreduce_scaleout_sycl_simple(sycl::queue& q,
     }
 
     done = true;
-    return ccl::event::create_from_native(op_end);
+    return op_end;
 }
 
 ccl::event allreduce_scaleout_sycl(sycl::queue& q,
@@ -120,12 +121,76 @@ ccl::event allreduce_scaleout_sycl(sycl::queue& q,
                                    ccl::reduction reduction,
                                    ccl_comm* comm,
                                    const ccl::vector_class<ccl::event>& deps,
+                                   bool original_deps,
+                                   sycl_allreduce_tune_attr tune_attr,
                                    bool& done,
-                                   bool direct,
                                    bool is_cpu_buffers) {
-    if (direct) {
-        bool copy_to_host = ccl::global_data::env().sycl_enable_direct_gpu_rdma ? false : true;
-        return allreduce_scaleout_sycl_simple(q,
+    auto ccl_dtype = ccl::global_data::get().dtypes->get(dtype);
+    bool copy_to_host = ccl::global_data::env().sycl_enable_direct_gpu_rdma ? false : true;
+    allreduce_scaleout_algo algo = tune_attr.algo;
+
+    sycl::event ev;
+    done = false;
+
+    switch (algo) {
+        case allreduce_scaleout_algo::direct:
+#ifdef CCL_ENABLE_ITT
+            ccl::profile::itt::task_begin(
+                "allreduce_scaleout_sycl_simple", "send_size", count * ccl_dtype.size());
+#endif // CCL_ENABLE_ITT
+            LOG_DEBUG("|CCL_SYCL| allreduce scaleout selects simple (direct) kernel, count:",
+                      count,
+                      " datatype: ",
+                      dtype);
+            ev = allreduce_scaleout_sycl_simple(q,
+                                                send_buf,
+                                                recv_buf,
+                                                count,
+                                                dtype,
+                                                reduction,
+                                                comm,
+                                                deps,
+                                                done,
+                                                copy_to_host,
+                                                is_cpu_buffers);
+#ifdef CCL_ENABLE_ITT
+            ccl::profile::itt::task_end();
+#endif // CCL_ENABLE_ITT
+            return ccl::event::create_from_native(ev);
+        case allreduce_scaleout_algo::rabenseifner:
+#ifdef CCL_ENABLE_ITT
+            ccl::profile::itt::task_begin(
+                "allreduce_scaleout_sycl_rabenseifner", "send_size", count * ccl_dtype.size());
+#endif // CCL_ENABLE_ITT
+            LOG_DEBUG("|CCL_SYCL| allreduce scaleout selects rabenseifner kernel, count:",
+                      count,
+                      " datatype: ",
+                      dtype);
+            ev = allreduce_scaleout_sycl_rabenseifner(q,
+                                                      send_buf,
+                                                      recv_buf,
+                                                      count,
+                                                      dtype,
+                                                      reduction,
+                                                      comm,
+                                                      deps,
+                                                      original_deps,
+                                                      tune_attr,
+                                                      done);
+#ifdef CCL_ENABLE_ITT
+            ccl::profile::itt::task_end();
+#endif // CCL_ENABLE_ITT
+            return ccl::event::create_from_native(ev);
+        case allreduce_scaleout_algo::ring:
+#ifdef CCL_ENABLE_ITT
+            ccl::profile::itt::task_begin(
+                "allreduce_scaleout_sycl_ring", "send_size", count * ccl_dtype.size());
+#endif // CCL_ENABLE_ITT
+            LOG_DEBUG("|CCL_SYCL| allreduce scaleout selects ring kernel, count:",
+                      count,
+                      " datatype: ",
+                      dtype);
+            ev = allreduce_scaleout_sycl_ring(q,
                                               send_buf,
                                               recv_buf,
                                               count,
@@ -133,13 +198,37 @@ ccl::event allreduce_scaleout_sycl(sycl::queue& q,
                                               reduction,
                                               comm,
                                               deps,
-                                              done,
-                                              copy_to_host,
-                                              is_cpu_buffers);
-    }
-    else {
-        sycl::event e = allreduce_scaleout_sycl_ring(
-            q, send_buf, recv_buf, count, dtype, reduction, comm, deps, done);
-        return ccl::event::create_from_native(e);
+                                              original_deps,
+                                              tune_attr,
+                                              done);
+#ifdef CCL_ENABLE_ITT
+            ccl::profile::itt::task_end();
+#endif // CCL_ENABLE_ITT
+            return ccl::event::create_from_native(ev);
+        default:
+#ifdef CCL_ENABLE_ITT
+            ccl::profile::itt::task_begin(
+                "allreduce_scaleout_sycl_simple", "send_size", count * ccl_dtype.size());
+#endif // CCL_ENABLE_ITT
+            LOG_DEBUG(
+                "|CCL_SYCL| allreduce scaleout selects default simple (direct) kernel, count:",
+                count,
+                " datatype: ",
+                dtype);
+            ev = allreduce_scaleout_sycl_simple(q,
+                                                send_buf,
+                                                recv_buf,
+                                                count,
+                                                dtype,
+                                                reduction,
+                                                comm,
+                                                deps,
+                                                done,
+                                                copy_to_host,
+                                                is_cpu_buffers);
+#ifdef CCL_ENABLE_ITT
+            ccl::profile::itt::task_end();
+#endif // CCL_ENABLE_ITT
+            return ccl::event::create_from_native(ev);
     }
 }

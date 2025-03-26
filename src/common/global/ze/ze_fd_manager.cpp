@@ -390,8 +390,8 @@ int fd_manager::convert_fd_pidfd(int convert_from_fd, int handle) {
     if (errno == EPERM) {
         LOG_WARN(strerror(errno),
                  ": This error occurs when the calling process does not have the necessary"
-                 "permissions to perform the operation on the target process's file descriptor."
-                 "I.E. Check permissions and /proc/sys/kernel/yama/ptrace_scope.")
+                 " permissions to perform the operation on the target process's file descriptor."
+                 " i.e. Check permissions and /proc/sys/kernel/yama/ptrace_scope.")
     }
     CCL_THROW_IF_NOT(fd != ccl::utils::invalid_fd,
                      "pidfd_getfd failed: "

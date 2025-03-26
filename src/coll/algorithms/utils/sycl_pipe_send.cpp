@@ -19,16 +19,20 @@
 //namespace ccl {
 //namespace v1 {
 
-const int num_chunk_buffs = 3;
+const int num_chunk_buffs = ccl_scaleout_pipeline_bufs::num_chunk_buffs;
 
 // calculate the total number of chunks for pipeline
-void pipe_prep(size_t min_msg_count, size_t max_msg_count, int dsize, size_t& nchunks) {
+void pipe_prep(size_t min_msg_count,
+               size_t max_msg_count,
+               int dsize,
+               size_t pipeline_chunk_size,
+               size_t& nchunks) {
     int align = std::max(4, dsize);
     min_msg_count = (min_msg_count * dsize + align - 1) / align;
     max_msg_count = (max_msg_count * dsize + align - 1) / align;
-    size_t max_chunk_count = ccl::global_data::env().sycl_pipeline_chunk_size / align;
-    size_t min_nchunks = (min_msg_count + max_chunk_count - 1) / max_chunk_count;
-    size_t max_nchunks = (max_msg_count + max_chunk_count - 1) / max_chunk_count;
+    size_t max_pipeline_chunk_count = pipeline_chunk_size / align;
+    size_t min_nchunks = (min_msg_count + max_pipeline_chunk_count - 1) / max_pipeline_chunk_count;
+    size_t max_nchunks = (max_msg_count + max_pipeline_chunk_count - 1) / max_pipeline_chunk_count;
     nchunks = std::max(min_nchunks, max_nchunks);
 }
 
@@ -43,10 +47,13 @@ static void calculate_chunk_sizes(size_t total_send_size,
     int align = std::max(4, dsize);
     send_chunk_size = (send_chunk_size + align - 1) / align * align;
     recv_chunk_size = (recv_chunk_size + align - 1) / align * align;
-    size_t max_chunk_size = ccl::global_data::env().sycl_pipeline_chunk_size;
-    assert(send_chunk_size <= max_chunk_size && recv_chunk_size <= max_chunk_size);
+    // validation
+    size_t max_pipeline_chunk_size = ccl::global_data::env().sycl_max_pipeline_chunk_size;
+    CCL_ASSERT(send_chunk_size <= max_pipeline_chunk_size &&
+               recv_chunk_size <= max_pipeline_chunk_size);
 }
 
+// one-way RDMA
 sycl::event pipe_sendrecv_rdma(sycl::queue& q,
                                const void* send_buf,
                                size_t send_count,
@@ -65,7 +72,6 @@ sycl::event pipe_sendrecv_rdma(sycl::queue& q,
     auto ccl_dtype = ccl::global_data::get().dtypes->get(dtype);
     size_t total_send_size = send_count * ccl_dtype.size();
     size_t total_recv_size = recv_count * ccl_dtype.size();
-    size_t max_chunk_size = ccl::global_data::env().sycl_pipeline_chunk_size;
     size_t send_chunk_size, recv_chunk_size;
 
     calculate_chunk_sizes(total_send_size,
@@ -74,14 +80,6 @@ sycl::event pipe_sendrecv_rdma(sycl::queue& q,
                           nchunks,
                           send_chunk_size,
                           recv_chunk_size);
-
-    if (comm->get_scaleout_host_buf_size() < send_chunk_size ||
-        comm->get_scaleout_host_buf_size() < recv_chunk_size) {
-        LOG_WARN("scaleout_host_buf_size is not big enough to handle ",
-                 send_count * ccl_dtype.size(),
-                 " bytes. Falling back. TODO: chunking/pipelining");
-        return e;
-    }
 
     // get pipe_chunks
     void** send_pipe_chunks = comm->get_scaleout_send_pipeline_bufs(num_chunk_buffs);
@@ -211,7 +209,6 @@ sycl::event pipe_sendrecv_plain(sycl::queue& q,
     auto ccl_dtype = ccl::global_data::get().dtypes->get(dtype);
     size_t total_send_size = send_count * ccl_dtype.size();
     size_t total_recv_size = recv_count * ccl_dtype.size();
-    size_t max_chunk_size = ccl::global_data::env().sycl_pipeline_chunk_size;
     size_t send_chunk_size, recv_chunk_size;
 
     calculate_chunk_sizes(total_send_size,
@@ -220,14 +217,6 @@ sycl::event pipe_sendrecv_plain(sycl::queue& q,
                           nchunks,
                           send_chunk_size,
                           recv_chunk_size);
-
-    if (comm->get_scaleout_host_buf_size() < send_chunk_size ||
-        comm->get_scaleout_host_buf_size() < recv_chunk_size) {
-        LOG_WARN("scaleout_host_buf_size is not big enough to handle ",
-                 send_count * ccl_dtype.size(),
-                 " bytes. Falling back. TODO: chunking/pipelining");
-        return e;
-    }
 
     // get pipe_chunks
     void** send_pipe_chunks = comm->get_scaleout_send_pipeline_bufs(num_chunk_buffs);
@@ -452,6 +441,125 @@ sycl::event pipe_sendrecv(sycl::queue& q,
                                   comm,
                                   deps);
     }
+}
+
+// two-way RDMA, no pipeline
+sycl::event sendrecv_rdma(sycl::queue& q,
+                          const void* send_buf,
+                          size_t send_count,
+                          int dest,
+                          int sendtag,
+                          void* recv_buf,
+                          size_t recv_count,
+                          int src,
+                          int recvtag,
+                          ccl::datatype dtype,
+                          ccl_comm* comm,
+                          const ccl::vector_class<sycl::event>& deps) {
+    sycl::event e;
+    std::shared_ptr<atl_base_comm> atl_comm = comm->get_atl_comm();
+    auto ccl_dtype = ccl::global_data::get().dtypes->get(dtype);
+    size_t send_size = send_count * ccl_dtype.size();
+    size_t recv_size = recv_count * ccl_dtype.size();
+    CCL_ASSERT(send_size <= comm->get_scaleout_host_buf_size());
+    CCL_ASSERT(recv_size <= comm->get_scaleout_host_buf_size());
+
+    int ep_idx = 0;
+    e = q.submit([=](sycl::handler& h) {
+        h.depends_on(deps);
+        h.host_task([=]() {
+            atl_req_t send_req, recv_req;
+            ATL_CALL_THROW_IF_ERROR(
+                atl_comm->send(ep_idx, send_buf, send_size, dest, sendtag, send_req));
+            ATL_CALL_THROW_IF_ERROR(
+                atl_comm->recv(ep_idx, recv_buf, recv_size, src, recvtag, recv_req));
+            ATL_CALL_THROW_IF_ERROR(atl_comm->check(ep_idx, send_req));
+            if (!send_req.is_completed) {
+                ATL_CALL_THROW_IF_ERROR(atl_comm->wait(ep_idx, send_req));
+            }
+            ATL_CALL_THROW_IF_ERROR(atl_comm->check(ep_idx, recv_req));
+            if (!recv_req.is_completed) {
+                ATL_CALL_THROW_IF_ERROR(atl_comm->wait(ep_idx, recv_req));
+            }
+        });
+    });
+    return e;
+}
+
+// no pipeline
+sycl::event gpu_send_plain(sycl::queue& q,
+                           const void* send_buf,
+                           size_t send_count,
+                           int dest,
+                           int sendtag,
+                           ccl::datatype dtype,
+                           ccl_comm* comm,
+                           const ccl::vector_class<sycl::event>& deps) {
+    sycl::event e;
+    std::shared_ptr<atl_base_comm> atl_comm = comm->get_atl_comm();
+    auto ccl_dtype = ccl::global_data::get().dtypes->get(dtype);
+    size_t send_size = send_count * ccl_dtype.size();
+    CCL_ASSERT(send_size <= comm->get_scaleout_host_buf_size());
+
+    void* host_buf = comm->get_scaleout_host_buf();
+    e = q.submit([=](sycl::handler& h) {
+        h.depends_on(deps);
+        h.memcpy(host_buf, send_buf, send_size);
+    });
+
+    int ep_idx = 0;
+    e = q.submit([=](sycl::handler& h) {
+        h.depends_on(e);
+        h.host_task([=]() {
+            atl_req_t send_req;
+            ATL_CALL_THROW_IF_ERROR(
+                atl_comm->send(ep_idx, host_buf, send_size, dest, sendtag, send_req));
+            ATL_CALL_THROW_IF_ERROR(atl_comm->check(ep_idx, send_req));
+            if (!send_req.is_completed) {
+                ATL_CALL_THROW_IF_ERROR(atl_comm->wait(ep_idx, send_req));
+            }
+        });
+    });
+    comm->put_scaleout_host_buf(host_buf);
+    return e;
+}
+
+sycl::event gpu_recv_plain(sycl::queue& q,
+                           void* recv_buf,
+                           size_t recv_count,
+                           int src,
+                           int recvtag,
+                           ccl::datatype dtype,
+                           ccl_comm* comm,
+                           const ccl::vector_class<sycl::event>& deps) {
+    sycl::event e;
+    std::shared_ptr<atl_base_comm> atl_comm = comm->get_atl_comm();
+    auto ccl_dtype = ccl::global_data::get().dtypes->get(dtype);
+    size_t recv_size = recv_count * ccl_dtype.size();
+    CCL_ASSERT(recv_size <= comm->get_scaleout_host_buf_size());
+
+    void* host_buf = comm->get_scaleout_host_buf();
+    int ep_idx = 0;
+    e = q.submit([=](sycl::handler& h) {
+        h.depends_on(deps);
+        h.host_task([=]() {
+            atl_req_t recv_req;
+            ATL_CALL_THROW_IF_ERROR(
+                atl_comm->recv(ep_idx, host_buf, recv_size, src, recvtag, recv_req));
+            ATL_CALL_THROW_IF_ERROR(atl_comm->check(ep_idx, recv_req));
+            if (!recv_req.is_completed) {
+                ATL_CALL_THROW_IF_ERROR(atl_comm->wait(ep_idx, recv_req));
+            }
+        });
+    });
+
+    e = q.submit([=](sycl::handler& h) {
+        h.depends_on(e);
+        h.memcpy(recv_buf, host_buf, recv_size);
+    });
+
+    comm->put_scaleout_host_buf(host_buf);
+    return e;
 }
 
 //} // namespace v1

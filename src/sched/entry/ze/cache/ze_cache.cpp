@@ -594,7 +594,10 @@ cache::cache(size_t instance_count)
             device_mems.push_back(std::make_unique<plain_device_mem_cache>());
         }
     }
-    LOG_DEBUG("create cache with ", instance_count, " instances");
+    LOG_DEBUG("device cache policy mode: ",
+              device_cache_policy_names[global_data::env().ze_device_cache_policy],
+              ", instance_count: ",
+              instance_count);
 }
 
 cache::~cache() {

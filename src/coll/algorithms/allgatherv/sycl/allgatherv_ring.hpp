@@ -16,6 +16,7 @@
 #pragma once
 
 #include "coll/algorithms/utils/sycl_coll_base.hpp"
+#include "coll/algorithms/utils/sycl_selection.hpp"
 #include "coll/coll_util.hpp"
 
 namespace ccl {
@@ -112,12 +113,18 @@ inline sycl::event allgatherv_ring_nonblocking(sycl::queue& q,
                                                ccl::datatype dtype,
                                                ccl_comm* comm,
                                                const ccl::vector_class<ccl::event>& deps,
+                                               bool original_deps,
+                                               sycl_allgatherv_tune_attr tune_attr,
                                                bool& done) {
     sycl::event sycl_e, copy_event;
     int world = comm->size();
     int rank = comm->rank();
 
     auto ccl_dtype = ccl::global_data::get().dtypes->get(dtype);
+
+    // tuning parameters
+    size_t pipeline_chunk_size = tune_attr.pipeline_chunk_size;
+
     size_t send_size = send_count * ccl_dtype.size();
     // calculate recv counts offsets
     std::vector<size_t> offsets(world);
@@ -129,22 +136,25 @@ inline sycl::event allgatherv_ring_nonblocking(sycl::queue& q,
     bool in_place = ccl::is_allgatherv_inplace(
         send_buf, send_count, recv_buf, recv_counts.data(), ccl_dtype.size(), rank, world);
 
-    // use an out-of-order queue
-#ifndef ENABLE_DEBUG
-    static
-#endif
-        sycl::queue q_worker(q.get_device());
-
     std::vector<sycl::event> dep_events = get_sycl_events(deps);
 
     if (!in_place) {
-        copy_event = q_worker.submit([=](sycl::handler& h) {
+        copy_event = q.submit([=](sycl::handler& h) {
             h.depends_on(dep_events);
             h.memcpy((char*)recv_buf + offsets[rank], send_buf, send_size);
         });
         dep_events.clear();
         dep_events.push_back(std::move(copy_event));
     }
+    else if (original_deps) {
+        sycl::event e = submit_wait_on_events(q, dep_events);
+        dep_events.clear();
+        dep_events.push_back(std::move(e));
+    }
+
+    // use an out-of-order queue
+    sycl::queue q_worker(q.get_device());
+
     // send my buffer
     void *send_ptr, *recv_ptr;
     size_t send_block_count, recv_block_count;
@@ -166,7 +176,15 @@ inline sycl::event allgatherv_ring_nonblocking(sycl::queue& q,
     size_t nchunks;
     auto min_count = std::min_element(recv_counts.begin(), recv_counts.end());
     auto max_count = std::max_element(recv_counts.begin(), recv_counts.end());
-    pipe_prep(*min_count, *max_count, ccl_dtype.size(), nchunks);
+    pipe_prep(*min_count, *max_count, ccl_dtype.size(), pipeline_chunk_size, nchunks);
+    LOG_DEBUG("Allgatherv ring min_block_count: ",
+              *min_count,
+              " max_block_count: ",
+              *max_count,
+              " nchunks: ",
+              nchunks,
+              " pipeline_chunk_size: ",
+              pipeline_chunk_size);
 
     int iter = 0;
     sycl::event sendrecv_e;
@@ -215,7 +233,12 @@ inline sycl::event allgatherv_scaleout_sycl_ring(sycl::queue& q,
                                                  ccl::datatype dtype,
                                                  ccl_comm* comm,
                                                  const ccl::vector_class<ccl::event>& deps,
+                                                 bool original_deps,
                                                  bool& done) {
+    // TODO: move tuning to upper level
+    size_t auto_pipeline_chunk_size = allgatherv_select_chunk_size();
+    sycl_allgatherv_tune_attr tune_attr = { allgatherv_scaleout_algo::ring, auto_pipeline_chunk_size };
+
     auto lambda = [&]<typename T>() {
         if (ccl::global_data::env().enable_op_sync) {
             return allgatherv_ring_blocking<T>(
@@ -223,7 +246,7 @@ inline sycl::event allgatherv_scaleout_sycl_ring(sycl::queue& q,
         }
         else {
             return allgatherv_ring_nonblocking<T>(
-                q, send_buf, send_count, recv_buf, recv_counts, dtype, comm, deps, done);
+                q, send_buf, send_count, recv_buf, recv_counts, dtype, comm, deps, original_deps, tune_attr, done);
         }
     };
 

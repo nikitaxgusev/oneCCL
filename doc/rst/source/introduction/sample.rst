@@ -1,6 +1,6 @@
-==================
-Sample Application
-==================
+==========================
+Build a Sample Application
+==========================
 
 The sample code below shows how to use |product_short| API to perform allreduce communication for SYCL USM memory.
 
@@ -8,12 +8,17 @@ The sample code below shows how to use |product_short| API to perform allreduce 
    :language: cpp
 
 
-Build details
-*************
+Build the Library
+*****************
 
-#. :ref:`Build <enable_sycl>` |product_short| with ``SYCL`` support (only Intel\ |reg|\  oneAPI DPC++/C++ Compiler is supported).
+#. Build the library with ``SYCL`` support (only Intel\ |reg|\  oneAPI DPC++/C++ Compiler is supported).
 
-#. `Set up the library environment <https://www.intel.com/content/www/us/en/docs/oneccl/get-started-guide/current/overview.html#SAMPLE-APPLICATION>`_.
+   ::
+
+     cmake .. -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx -DCOMPUTE_BACKEND=dpcpp
+     make install
+
+#. `Set up the library environment <https://www.intel.com/content/www/us/en/docs/oneccl/get-started-guide/2021-13/overview.html#BEFORE-YOU-BEGIN>`_.
 
 #. Use the C++ driver with the -fsycl option to build the sample:
 
@@ -22,7 +27,7 @@ Build details
       icpx -o sample sample.cpp -lccl -lmpi -fsycl
 
 
-Run the sample
+Run the Sample
 **************
 
 Intel\ |reg|\  MPI Library is required for running the sample. Make sure that MPI environment is set up.

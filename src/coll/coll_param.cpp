@@ -462,6 +462,15 @@ void ccl_coll_param::validate() const {
                                  get_recv_buf());
             }
 
+            if (ctype == ccl_coll_allreduce || ctype == ccl_coll_reduce_scatter ||
+                ctype == ccl_coll_reduce) {
+                if (reduction == ccl::reduction::avg) {
+                    // CCL_THROW_IF_NOT produce and error message which CI interprets as a failed test,
+                    // however in some cases we want to throw exception, catch it and skip the average test.
+                    CCL_THROW("average operation is not supported for the scheduler path");
+                }
+            }
+
             CCL_THROW_IF_NOT(
                 send_counts.size() == 1, "unexpected send_counts size ", send_counts.size());
 

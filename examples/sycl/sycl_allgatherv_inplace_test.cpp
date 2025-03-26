@@ -19,7 +19,22 @@ using namespace std;
 using namespace sycl;
 
 int main(int argc, char *argv[]) {
-    const size_t count = 10 * 1024 * 1024;
+    if (argc < 2) {
+        cout << "usage ./sycl_allgatherv_inplace_test [device]\n";
+        cout << "device could be 'cpu' or 'gpu'\n";
+        cout << "example: ./sycl_allgatherv_inplace_test cpu\n";
+        exit(1);
+    }
+
+    string device_type = argv[1];
+
+    if (device_type != "cpu" && device_type != "gpu") {
+        cout << "error: Invalid device '" << device_type << "'.\n";
+        cout << "device must be either 'cpu' or 'gpu'.\n";
+        exit(1);
+    }
+
+    size_t count = 10 * 1024 * 1024;
 
     int size = 0;
     int rank = 0;
@@ -34,10 +49,15 @@ int main(int argc, char *argv[]) {
 
     atexit(mpi_finalize);
 
-    queue q;
-    if (!create_sycl_queue(argc, argv, rank, q)) {
-        return -1;
+    test_args args(argc, argv, rank);
+
+    if (args.count != args.DEFAULT_COUNT) {
+        count = args.count;
     }
+
+    sycl::queue q;
+    if (!create_test_sycl_queue(device_type, rank, q, args))
+        return -1;
 
     /* create kvs */
     ccl::shared_ptr_class<ccl::kvs> kvs;

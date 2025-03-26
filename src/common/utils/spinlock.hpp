@@ -17,6 +17,7 @@
 
 #include <atomic>
 #include <immintrin.h>
+#include "oneapi/ccl/config.h"
 
 class ccl_spinlock {
 public:
@@ -26,9 +27,9 @@ public:
 
     ccl_spinlock& operator=(const ccl_spinlock& src) = delete;
 
-    void lock();
-    bool try_lock();
-    void unlock();
+    CCL_API void lock();
+    CCL_API bool try_lock();
+    CCL_API void unlock();
 
 private:
     std::atomic_flag flag;

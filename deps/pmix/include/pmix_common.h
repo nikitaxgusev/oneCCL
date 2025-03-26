@@ -863,6 +863,7 @@ typedef uint32_t pmix_rank_t;
 #define PMIX_JOB_CTRL_PROVISION_IMAGE       "pmix.jctrl.pvnimg"     // (char*) name of the image that is to be provisioned
 #define PMIX_JOB_CTRL_PREEMPTIBLE           "pmix.jctrl.preempt"    // (bool) job can be pre-empted
 #define PMIX_JOB_CTRL_TERMINATE             "pmix.jctrl.term"       // (bool) politely terminate the specified procs
+#define PMIX_JOB_CTRL_DEFINE_PSET           "pmix.jctrl.defpset"    // (char*) Pset name to be assigned to the targets
 #define PMIX_REGISTER_CLEANUP               "pmix.reg.cleanup"      // (char*) comma-delimited list of files to
                                                                     //         be removed upon process termination
 #define PMIX_REGISTER_CLEANUP_DIR           "pmix.reg.cleanupdir"   // (char*) comma-delimited list of directories to
@@ -1160,6 +1161,10 @@ typedef uint32_t pmix_rank_t;
                                                                    //         This attribute can be used with PMIx_Query_info outside of the init/finalize region.
 #define PMIX_QUERY_PROVISIONAL_ABI_VERSION  "pmix.qry.prabiver"    // (char*) The PMIx Standard Provisional ABI version supported returned in the form of a comma separated "MAJOR.MINOR"
                                                                    //         This attribute can be used with PMIx_Query_info outside of the init/finalize region.
+
+#define PMIX_VERSION_NUMERIC                "pmix.vers.num"        // (uint32_t) Numeric representation of the version of the PMIx library
+                                                                   //            being used
+
 
 /****    PROCESS STATE DEFINITIONS    ****/
 typedef uint8_t pmix_proc_state_t;

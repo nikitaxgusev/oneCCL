@@ -17,6 +17,8 @@
 #include "common/log/log.hpp"
 #include "common/utils/exchange_utils.hpp"
 #include "common/utils/fd_info.hpp"
+#include "coll/coll_util.hpp"
+#include "common/api_wrapper/mpi_api_wrapper.hpp"
 
 namespace ccl {
 namespace utils {
@@ -51,18 +53,57 @@ bool allgatherv(const std::shared_ptr<atl_base_comm>& comm,
         offsets[i] = offsets[i - 1] + recv_bytes[i - 1];
     }
 
-    comm->allgatherv(0 /* ep_idx */,
-                     send_buf,
-                     recv_bytes[comm_rank],
-                     recv_buf,
-                     recv_bytes.data(),
-                     offsets.data(),
-                     req);
-    if (sync) {
-        comm->wait(0 /* ep_idx */, req);
+    // MPI_Iallgatherv used in ipc exchange is interfering with
+    // other MPI collectives from other threads when both sycl
+    // and scheduler paths are running together. MPI_Allgatherv
+    // seems to not have the issue, and so using it here.
+    if (ccl::global_data::env().atl_transport == ccl_atl_mpi &&
+        ccl::global_data::env().ipc_allgatherv_wa) {
+        const size_t send_len = recv_bytes[comm_rank];
+        MPI_Comm mpi_comm = comm->get_mpi_comm();
+
+        std::vector<size_t> recv_lens_size_t(comm_size, 0);
+        std::vector<Compat_MPI_Count_t> recv_conv_lens(comm_size);
+        std::vector<Compat_MPI_Aint_t> recv_conv_offsets(comm_size);
+
+        for (int i = 0; i < comm_size; ++i) {
+            recv_lens_size_t[i] = recv_bytes[i];
+            recv_conv_lens[i] = static_cast<Compat_MPI_Aint_t>(recv_bytes[i]);
+            recv_conv_offsets[i] = static_cast<Compat_MPI_Aint_t>(offsets[i]);
+        }
+
+        bool inplace = ccl::is_allgatherv_inplace(send_buf,
+                                                  send_len,
+                                                  recv_buf,
+                                                  recv_lens_size_t.data(),
+                                                  1 /*dtype_size*/,
+                                                  comm_rank,
+                                                  comm_size);
+
+        int mpi_ret = MPI_Allgatherv_c(inplace ? MPI_IN_PLACE : send_buf,
+                                       send_len,
+                                       MPI_CHAR,
+                                       recv_buf,
+                                       recv_conv_lens.data(),
+                                       recv_conv_offsets.data(),
+                                       MPI_CHAR,
+                                       mpi_comm);
+        ret = mpi_ret == MPI_SUCCESS;
     }
     else {
-        CCL_THROW("unexpected sync parameter");
+        comm->allgatherv(0 /* ep_idx */,
+                         send_buf,
+                         recv_bytes[comm_rank],
+                         recv_buf,
+                         recv_bytes.data(),
+                         offsets.data(),
+                         req);
+        if (sync) {
+            comm->wait(0 /* ep_idx */, req);
+        }
+        else {
+            CCL_THROW("unexpected sync parameter");
+        }
     }
     return ret;
 }

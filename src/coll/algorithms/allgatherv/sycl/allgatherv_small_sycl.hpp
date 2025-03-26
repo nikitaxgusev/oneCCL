@@ -343,7 +343,7 @@ public:
                     int r = idx / threads_per_rank;
                     int idx_rank = idx % threads_per_rank;
 
-                    int in_place = (char *)recv_buf + temp_rank * send_count * sizeof(data_type) == send_buf;
+                    int in_place = ((char *)recv_buf + temp_rank * send_count * sizeof(data_type)) == send_buf;
                     if (r == temp_rank && in_place) {
                         return;
                     }
@@ -436,7 +436,7 @@ public:
         e = queue.submit([&](sycl::handler &cgh) {
             cgh.parallel_for<Allgatherv_small_kernel_scalar<data_type, kernel_inner_loop_scalar, wg_size>>(
                 sycl::nd_range<1>({ total_threads_dispatched }, wg_size),
-                [=](sycl::nd_item<1> idx2) [[intel::reqd_sub_group_size(wg_size)]] {
+                [=](sycl::nd_item<1> idx2) [[sycl::reqd_sub_group_size(wg_size)]] {
                     uint32_t idx = idx2.get_global_id();
 
                     int *local_sync_ptr;
@@ -555,7 +555,7 @@ public:
                     uint32_t r = idx / threads_per_rank;
                     int idx_rank = idx % threads_per_rank;
 
-                    int in_place = (char *)recv_buf + temp_rank * send_count * sizeof(data_type) == send_buf;
+                    int in_place = ((char *)recv_buf + temp_rank * send_count * sizeof(data_type)) == send_buf;
                     if (r == temp_rank && in_place)
                         return;
 

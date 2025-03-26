@@ -213,7 +213,7 @@ ccl_request* ccl_sched::start(ccl_executor* exec,
     if (ccl::global_data::env().sched_dump) {
         std::stringstream ostream;
         dump(ostream);
-        logger.info(ostream.str());
+        ccl_logger::get_instance().info(ostream.str());
     }
 
     exec->start(this);
@@ -531,7 +531,7 @@ void ccl_sched::complete() {
                     ss << "\n";
                 }
                 ss << "-----------------------------";
-                logger.info(ss.str());
+                ccl_logger::get_instance().info(ss.str());
             }
         }
 

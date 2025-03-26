@@ -20,19 +20,32 @@
 #include "common/global/global.hpp"
 #include "common/log/log.hpp"
 
+#define CCL_LOAD_LB_SUCCESS      0
+#define CCL_LOAD_LB_PATH_ERROR   1
+#define CCL_LOAD_LB_DLOPEN_ERROR 2
+
 namespace ccl {
+
+typedef void* (*indirect_symbol_fn_t)();
 
 typedef struct lib_info {
     std::string path;
     void* handle;
     void* ops;
     std::vector<std::string> fn_names;
+    // All varialbes above are initialized in XX_api_init()
+    // Libraries in direct mode load symbols by their names,
+    // while libraries with direct == false (indirect),
+    // user get functions that return pointer to the function
+    // inside loaded library (indirect_symbol_fn_t)
+    bool direct = true;
 } lib_info_t;
 
 void api_wrappers_init();
 void api_wrappers_fini();
 
-void load_library(lib_info_t& info);
+int load_library(lib_info_t& info);
+void print_error(int error, lib_info_t& info);
 void close_library(lib_info_t& info);
 
 } //namespace ccl

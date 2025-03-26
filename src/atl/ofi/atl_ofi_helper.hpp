@@ -39,6 +39,11 @@
 #include "sched/entry/ze/ze_primitives.hpp"
 #endif // CCL_ENABLE_OFI_HMEM
 
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+
 #define ATL_OFI_BASE_PM_KEY           "atl-ofi"
 #define ATL_OFI_FI_ADDR_PM_KEY        ATL_OFI_BASE_PM_KEY "-fiaddr"
 #define ATL_OFI_FI_ADDR_UPDATE_PM_KEY ATL_OFI_BASE_PM_KEY "-fiaddr_update"
@@ -253,7 +258,13 @@ atl_status_t atl_ofi_prov_update_addr_table(atl_ofi_ctx_t& ctx,
                                             const atl_proc_coord_t& coord,
                                             size_t prov_idx,
                                             std::shared_ptr<ipmi> pmi,
-                                            ep_names_t& ep_names);
+                                            ep_names_t& ep_names,
+                                            void* shared_memory,
+                                            size_t length,
+                                            size_t total_named_eps,
+                                            size_t local_addr_offset,
+                                            size_t global_addr_offset,
+                                            int cur_comm_id);
 atl_status_t atl_ofi_prov_ep_get_name(atl_ofi_prov_t* prov, size_t ep_idx);
 atl_status_t atl_ofi_prov_eps_connect(atl_ofi_ctx_t& ctx,
                                       const atl_proc_coord_t& coord,
@@ -291,3 +302,43 @@ atl_status_t atl_ofi_open_nw_provs(atl_ofi_ctx_t& ctx,
                                    std::vector<ep_names_t>& ep_names,
                                    bool log_on_error);
 void atl_ofi_init_req(atl_req_t& req, atl_ofi_prov_ep_t* prov_ep, struct fid_ep* fi_ep);
+
+struct ShmBarrierData {
+    std::atomic<int> barrier_counter;
+    std::atomic<int> call_count;
+
+    ShmBarrierData() : barrier_counter(0), call_count(0) {}
+};
+
+#define MAX_COMM 32768
+
+struct ShmBarrierAllComms {
+    ShmBarrierData comm_barriers[MAX_COMM];
+};
+
+struct barrier_mem_t {
+    ShmBarrierAllComms all_comms;
+};
+
+#define COUNTER_OFFSET (sizeof(barrier_mem_t))
+
+std::string get_shm_filename(std::string filename);
+void shm_barrier(void* mem, int local_size, int comm_id);
+
+atl_status_t setup_shared_memory(std::string shm_name,
+                                 int local_size,
+                                 bool is_node_root,
+                                 size_t length,
+                                 void** out_shared_memory,
+                                 int cur_comm_id);
+atl_status_t fetch_and_populate_remote_data(void* shared_memory,
+                                            size_t local_size,
+                                            size_t global_size,
+                                            int global_rank,
+                                            int local_rank,
+                                            size_t total_named_eps,
+                                            size_t addr_len,
+                                            size_t local_addr_offset,
+                                            size_t global_addr_offset,
+                                            char* shm_base,
+                                            size_t length);

@@ -13,6 +13,7 @@
  See the License for the specific language governing permissions and
  limitations under the License.
 */
+#include "common/api_wrapper/openmp_wrapper.hpp"
 #include "oneapi/ccl/types.hpp"
 #include "oneapi/ccl/aliases.hpp"
 
@@ -62,11 +63,15 @@
 #include "sched/sched_timer.hpp"
 #include "unordered_coll/unordered_coll.hpp"
 
+#include "atl/mpi/atl_mpi.hpp"
+#include "common/api_wrapper/mpi_api_wrapper.hpp"
+
 #if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE)
 #include "coll/algorithms/utils/sycl_selection.hpp"
 #include "coll/algorithms/allreduce/sycl/allreduce_sycl.hpp"
 #include "coll/algorithms/reduce_scatter/sycl/reduce_scatter_sycl.hpp"
 #include "coll/algorithms/allgatherv/sycl/allgatherv_sycl.hpp"
+#include "coll/algorithms/alltoall/sycl/alltoall_sycl.hpp"
 #endif // CCL_ENABLE_SYCL && CCL_ENABLE_ZE
 
 #if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE)
@@ -188,13 +193,15 @@ static ccl_request* ccl_coll_create(ccl_coll_param& param, const ccl_coll_attr& 
         }
     }
 
-    if (ccl::global_data::env().enable_op_sync)
+    if (ccl::global_data::env().enable_op_sync) {
         attr.synchronous = 1;
+    }
 
-    // TODO: remove after MLSL-1915 (ring barrier is broken) is done
-    // this is needed because OFI transport means we need ring barrier
-    if (ccl::global_data::env().atl_transport == ccl_atl_ofi)
+    // TODO: remove after MLSL-3510 (asynchronous ofi failure) is fixed
+    if (ccl::global_data::env().atl_transport == ccl_atl_ofi) {
         attr.synchronous = 1;
+    }
+
 #endif // CCL_ENABLE_SYCL
 
     LOG_DEBUG("\n{\n",
@@ -210,7 +217,7 @@ static ccl_request* ccl_coll_create(ccl_coll_param& param, const ccl_coll_attr& 
 
     ccl::global_data& data = ccl::global_data::get();
 
-    if (group_impl::is_group_active && param.is_pt2pt) {
+    if (group_impl::is_group_active) {
         LOG_DEBUG("group API is applied for: ", ccl_coll_type_to_str(param.ctype));
     }
 
@@ -234,40 +241,79 @@ static ccl_request* ccl_coll_create(ccl_coll_param& param, const ccl_coll_attr& 
     selector_param.peer_rank = param.peer_rank;
     selector_param.is_scaleout = param.is_scaleout;
 
+    // Some allgatherv algos hang up because of L0 submissions from multiple schedules MLSL-3258, MLSL-3461
+    // WA is to make allgatherv flat & mullti_bcast synchronous
+    if (param.ctype == ccl_coll_allgatherv &&
+        (ccl::global_data::get().algorithm_selector->get<ccl_coll_allgatherv>(selector_param) ==
+             ccl_coll_allgatherv_flat ||
+         ccl::global_data::get().algorithm_selector->get<ccl_coll_allgatherv>(selector_param) ==
+             ccl_coll_allgatherv_multi_bcast)) {
+        attr.synchronous = 1;
+    }
+
     if ((param.ctype == ccl_coll_send || param.ctype == ccl_coll_recv) && attr.to_cache) {
         // cache mode is disabled for point-to-point operations
         attr.to_cache = 0;
     }
 
-    // observe a large overhead when invoking direct algorithms with cache mode disabled
-    // enable cache mode for direct algorithms (all the collectives) to reduce the overhead
+    // r2r_comm.size() == 1 means single node
     if (ccl::global_data::env().atl_transport == ccl_atl_mpi &&
-        ccl_is_direct_algo(selector_param) && attr.to_cache == 0 &&
-        ccl::global_data::env().enable_sync_coll && ccl::global_data::env().enable_auto_cache
+        ccl_is_direct_algo(selector_param) && ccl::global_data::env().enable_sync_coll
 #ifdef CCL_ENABLE_SYCL
-        && !attr.is_sycl_buf
+        && !attr.is_sycl_buf && !checkers::is_device_buf(selector_param)
 #endif // CCL_ENABLE_SYCL
     ) {
-        if (param.ctype != ccl_coll_send && param.ctype != ccl_coll_recv) {
-            // need to set up match_id if match_id is used for caching and it is empty
-            // set up the match_id similarly as in ccl_sched_key_hasher
-            if (ccl::global_data::env().cache_key_type == ccl_cache_key_match_id &&
-                attr.match_id.empty()) {
-                size_t send_counts_sum =
-                    std::accumulate(param.send_counts.begin(), param.send_counts.end(), size_t(0));
-                size_t recv_counts_sum =
-                    std::accumulate(param.recv_counts.begin(), param.recv_counts.end(), size_t(0));
-                std::stringstream match_id_stream;
-                match_id_stream << param.ctype << "_"
-                                << ccl::utils::enum_to_underlying(param.dtype.idx()) << "_"
-                                << ccl::utils::enum_to_underlying(param.reduction) << "_"
-                                << param.send_count << "_" << param.count << "_" << param.root
-                                << "_" << param.send_bufs[0] << "_" << param.recv_bufs[0] << "_"
-                                << param.comm << "_" << attr.reduction_fn << "_" << send_counts_sum
-                                << "_" << recv_counts_sum;
-                attr.match_id = match_id_stream.str();
+#if defined(CCL_ENABLE_MPI) && defined(CCL_ENABLE_OMP)
+        // invoke allreduce with openmp threads
+        if (param.ctype == ccl_coll_allreduce && ccl::openmp_lib_ops.allreduce != nullptr &&
+            ccl::openmp_lib_ops.thread_num != nullptr &&
+            param.comm->get_r2r_comm().get()->size() == 1 &&
+            atl_mpi_ctx::get_lib_attr().type == atl_mpi_ctx::ATL_MPI_LIB_IMPI &&
+            atl_mpi_ctx::get_lib_attr().version_value >= 2021 &&
+            atl_mpi_ctx::get_lib_attr().sub_version_value >= 15 &&
+            ccl::global_data::env().enable_omp_allreduce) {
+            // requires I_MPI_THREAD_RUNTIME=openmp
+            if (ccl::openmp_lib_ops.thread_num() > 0) {
+                ccl::openmp_lib_ops.allreduce(param.send_bufs[0],
+                                              param.recv_bufs[0],
+                                              param.send_counts[0],
+                                              param.dtype.idx(),
+                                              param.reduction,
+                                              attr,
+                                              param.comm,
+                                              param.stream,
+                                              param.deps);
+                // returned nullptr will be used to create an empty and completed event
+                return nullptr;
             }
-            attr.to_cache = 1;
+        }
+#endif // CCL_ENABLE_MPI && CCL_ENABLE_OMP
+        if (attr.to_cache == 0 && ccl::global_data::env().enable_auto_cache) {
+            // observe a large overhead when invoking direct algorithms with cache mode disabled
+            // enable cache mode for direct algorithms (all the collectives) to reduce the overhead
+            if (param.ctype != ccl_coll_send && param.ctype != ccl_coll_recv) {
+                // need to set up match_id if match_id is used for caching and it is empty
+                // set up the match_id similarly as in ccl_sched_key_hasher
+                if (ccl::global_data::env().cache_key_type == ccl_cache_key_match_id &&
+                    attr.match_id.empty()) {
+                    size_t send_counts_sum = std::accumulate(
+                        param.send_counts.begin(), param.send_counts.end(), size_t(0));
+                    size_t recv_counts_sum = std::accumulate(
+                        param.recv_counts.begin(), param.recv_counts.end(), size_t(0));
+                    std::stringstream match_id_stream;
+                    match_id_stream
+                        << param.ctype << "_" << ccl::utils::enum_to_underlying(param.dtype.idx())
+                        << "_" << ccl::utils::enum_to_underlying(param.reduction) << "_"
+                        << param.send_count << "_" << param.count << "_" << param.root << "_"
+                        << param.comm << "_" << attr.reduction_fn << "_" << send_counts_sum << "_"
+                        << recv_counts_sum;
+                    if (param.ctype != ccl_coll_barrier) {
+                        match_id_stream << "_" << param.send_bufs[0] << "_" << param.recv_bufs[0];
+                    }
+                    attr.match_id = match_id_stream.str();
+                }
+                attr.to_cache = 1;
+            }
         }
     }
 
@@ -1027,6 +1073,85 @@ ccl::status ccl_coll_build_send(ccl_sched* sched,
     return status;
 }
 
+ccl::event ccl_allgather(const void* send_buf,
+                         void* recv_buf,
+                         size_t count,
+                         ccl::datatype dtype,
+                         const ccl_coll_attr& attr,
+                         ccl_comm* comm,
+                         const ccl_stream* stream,
+                         const std::vector<ccl::event>& deps) {
+    std::function<ccl::event()> collective =
+        [send_buf, recv_buf, count, dtype, attr, comm, stream, &deps]() -> ccl::event {
+        auto req = ccl_allgather_impl(send_buf, recv_buf, count, dtype, attr, comm, stream, deps);
+        return std::unique_ptr<ccl::event_impl>(new ccl::host_event_impl(req));
+    };
+#if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE)
+    ccl_selector_param param = ccl_selector_param::create(ccl_coll_allgather,
+                                                          count,
+                                                          dtype,
+                                                          comm,
+                                                          const_cast<ccl_stream*>(stream),
+                                                          recv_buf,
+                                                          ccl::reduction::custom,
+                                                          false, // is_vector_buf
+                                                          false, // is_sycl_buf
+                                                          CCL_INVALID_PEER_RANK_IDX, // peer_rank
+                                                          {}, // hint_algo
+                                                          false); // is_scaleout
+    if (can_use_sycl_kernels(param)) {
+        if (comm->is_multi_thread_instance() == true) {
+            CCL_THROW("allgather is not supported for multithreaded communicator yet");
+        }
+
+        LOG_DEBUG(
+            "|CCL_SYCL| allgather selects sycl-kernels count: ", count, ", datatype: ", dtype);
+
+        ccl_stream* op_stream = const_cast<ccl_stream*>(stream);
+        auto q = op_stream->get_native_stream();
+        auto dummy_unused_attr = ccl::create_operation_attr<ccl::allgatherv_attr>();
+        const ccl::vector_class<size_t> recv_counts(comm->size(), count);
+        collective = [=, &q, &deps]() -> ccl::event {
+            bool done = false;
+            ccl::event ccl_event = ccl::allgather_sycl(q,
+                                                       send_buf,
+                                                       count,
+                                                       recv_buf,
+                                                       recv_counts,
+                                                       dtype,
+                                                       comm,
+                                                       op_stream,
+                                                       dummy_unused_attr,
+                                                       deps,
+                                                       done);
+            if (done) {
+                if (ccl::global_data::env().enable_op_sync) {
+                    ccl_event.wait();
+                }
+                return ccl_event;
+            }
+            return collective();
+        };
+    }
+#endif // CCL_ENABLE_SYCL && CCL_ENABLE_ZE
+    ccl_request* req{};
+    ccl::event event = std::unique_ptr<ccl::event_impl>(
+        new ccl::host_event_impl(req, group_impl::is_group_active));
+    if (group_impl::is_group_active) {
+        auto ctype = ccl_coll_allgather;
+        if (deps.size() != 0) {
+            LOG_WARN("explicit dependencies are not supported for group calls: ",
+                     ccl_coll_type_to_str(ctype));
+        }
+        group_impl::add_operation(ctype, std::move(collective));
+        // operation will be started later, currently returning empty event
+    }
+    else {
+        event = collective();
+    }
+    return event;
+}
+
 ccl_request* ccl_allgather_impl(const void* send_buf,
                                 void* recv_buf,
                                 size_t count,
@@ -1052,6 +1177,13 @@ ccl::event ccl_allgatherv(const void* send_buf,
                           ccl_comm* comm,
                           const ccl_stream* stream,
                           const std::vector<ccl::event>& deps) {
+    std::function<ccl::event()> collective =
+        [send_buf, send_count, recv_buf, recv_counts, dtype, attr, comm, stream, &deps]()
+        -> ccl::event {
+        auto req = ccl_allgatherv_impl(
+            send_buf, send_count, recv_buf, recv_counts.data(), dtype, attr, comm, stream, deps);
+        return std::unique_ptr<ccl::event_impl>(new ccl::host_event_impl(req));
+    };
 #if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE)
     ccl_selector_param param = ccl_selector_param::create(ccl_coll_allgatherv,
                                                           send_count,
@@ -1065,39 +1197,60 @@ ccl::event ccl_allgatherv(const void* send_buf,
                                                           CCL_INVALID_PEER_RANK_IDX, // peer_rank
                                                           {}, // hint_algo
                                                           false); // is_scaleout
+    param.recv_counts = recv_counts.data();
 
     if (can_use_sycl_kernels(param)) {
+        if (comm->is_multi_thread_instance() == true) {
+            CCL_THROW("allgatherv is not supported for multithreaded communicator yet");
+        }
+
         LOG_DEBUG("|CCL_SYCL| allgatherv selects sycl-kernels send_count: ",
                   send_count,
                   ", datatype: ",
                   dtype);
 
-        bool done = false;
         ccl_stream* op_stream = const_cast<ccl_stream*>(stream);
         auto q = op_stream->get_native_stream();
         auto dummy_unused_attr = ccl::create_operation_attr<ccl::allgatherv_attr>();
-        ccl::event ccl_event = ccl::allgather_sycl(q,
-                                                   send_buf,
-                                                   send_count,
-                                                   recv_buf,
-                                                   recv_counts,
-                                                   dtype,
-                                                   comm,
-                                                   op_stream,
-                                                   dummy_unused_attr,
-                                                   deps,
-                                                   done);
-        if (done) {
-            if (ccl::global_data::env().enable_op_sync) {
-                ccl_event.wait();
+        collective = [=, &q, &deps]() -> ccl::event {
+            bool done = false;
+            ccl::event ccl_event = ccl::allgather_sycl(q,
+                                                       send_buf,
+                                                       send_count,
+                                                       recv_buf,
+                                                       recv_counts,
+                                                       dtype,
+                                                       comm,
+                                                       op_stream,
+                                                       dummy_unused_attr,
+                                                       deps,
+                                                       done);
+            if (done) {
+                if (ccl::global_data::env().enable_op_sync) {
+                    ccl_event.wait();
+                }
+                return ccl_event;
             }
-            return ccl_event;
-        }
+            return collective();
+        };
     }
 #endif // CCL_ENABLE_SYCL && CCL_ENABLE_ZE
-    ccl_request* req = ccl_allgatherv_impl(
-        send_buf, send_count, recv_buf, recv_counts.data(), dtype, attr, comm, stream, deps);
-    return std::unique_ptr<ccl::event_impl>(new ccl::host_event_impl(req));
+    ccl_request* req{};
+    ccl::event event = std::unique_ptr<ccl::event_impl>(
+        new ccl::host_event_impl(req, group_impl::is_group_active));
+    if (group_impl::is_group_active) {
+        auto ctype = ccl_coll_allgatherv;
+        if (deps.size() != 0) {
+            LOG_WARN("explicit dependencies are not supported for group calls: ",
+                     ccl_coll_type_to_str(ctype));
+        }
+        group_impl::add_operation(ctype, std::move(collective));
+        // operation will be started later, currently returning empty event
+    }
+    else {
+        event = collective();
+    }
+    return event;
 }
 
 ccl_request* ccl_allgatherv_impl(const void* send_buf,
@@ -1126,6 +1279,12 @@ ccl::event ccl_allreduce(const void* send_buf,
                          ccl_comm* comm,
                          const ccl_stream* stream,
                          const std::vector<ccl::event>& deps) {
+    std::function<ccl::event()> collective =
+        [send_buf, recv_buf, count, dtype, reduction, attr, comm, stream, &deps]() -> ccl::event {
+        auto req = ccl_allreduce_impl(
+            send_buf, recv_buf, count, dtype, reduction, attr, comm, stream, deps);
+        return std::unique_ptr<ccl::event_impl>(new ccl::host_event_impl(req));
+    };
 #if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE)
     ccl_selector_param param = ccl_selector_param::create(ccl_coll_allreduce,
                                                           count,
@@ -1139,37 +1298,61 @@ ccl::event ccl_allreduce(const void* send_buf,
                                                           CCL_INVALID_PEER_RANK_IDX, // peer_rank
                                                           {}, // hint_algo
                                                           false); // is_scaleout
-
     if (can_use_sycl_kernels(param)) {
+        if (comm->is_multi_thread_instance() == true && count < comm->size()) {
+            CCL_THROW("|CCL_SYCL| allreduce doesn't support count(",
+                      count,
+                      ") < comm size(",
+                      comm->size(),
+                      ") "
+                      "for multithreaded case yet");
+        }
+
         LOG_DEBUG(
             "|CCL_SYCL| allreduce selects sycl-kernels count: ", count, ", datatype: ", dtype);
 
-        bool done = false;
         ccl_stream* op_stream = const_cast<ccl_stream*>(stream);
         auto q = op_stream->get_native_stream();
         auto dummy_unused_attr = ccl::create_operation_attr<ccl::allreduce_attr>();
-        ccl::event ccl_event = allreduce_sycl(q,
-                                              send_buf,
-                                              recv_buf,
-                                              count,
-                                              dtype,
-                                              reduction,
-                                              comm,
-                                              const_cast<ccl_stream*>(stream),
-                                              dummy_unused_attr,
-                                              deps,
-                                              done);
-        if (done) {
-            if (ccl::global_data::env().enable_op_sync) {
-                ccl_event.wait();
+        collective = [=, &q, &deps]() -> ccl::event {
+            bool done = false;
+            ccl::event ccl_event = allreduce_sycl(q,
+                                                  send_buf,
+                                                  recv_buf,
+                                                  count,
+                                                  dtype,
+                                                  reduction,
+                                                  comm,
+                                                  const_cast<ccl_stream*>(stream),
+                                                  dummy_unused_attr,
+                                                  deps,
+                                                  done);
+            if (done) {
+                if (ccl::global_data::env().enable_op_sync) {
+                    ccl_event.wait();
+                }
+                return ccl_event;
             }
-            return ccl_event;
-        }
+            return collective();
+        };
     }
 #endif // CCL_ENABLE_SYCL && CCL_ENABLE_ZE
-    ccl_request* req =
-        ccl_allreduce_impl(send_buf, recv_buf, count, dtype, reduction, attr, comm, stream, deps);
-    return std::unique_ptr<ccl::event_impl>(new ccl::host_event_impl(req));
+    ccl_request* req{};
+    ccl::event event = std::unique_ptr<ccl::event_impl>(
+        new ccl::host_event_impl(req, group_impl::is_group_active));
+    if (group_impl::is_group_active) {
+        auto ctype = ccl_coll_allreduce;
+        if (deps.size() != 0) {
+            LOG_WARN("explicit dependencies are not supported for group calls: ",
+                     ccl_coll_type_to_str(ctype));
+        }
+        group_impl::add_operation(ctype, std::move(collective));
+        // operation will be started later, currently returning empty event
+    }
+    else {
+        event = collective();
+    }
+    return event;
 }
 
 ccl_request* ccl_allreduce_impl(const void* send_buf,
@@ -1185,9 +1368,82 @@ ccl_request* ccl_allreduce_impl(const void* send_buf,
         send_buf, recv_buf, count, dtype, reduction, attr, comm, stream, deps);
 
     auto req = ccl_coll_create(param, attr);
-    LOG_DEBUG(
-        "coll ", ccl_coll_type_to_str(param.ctype), " created, req ", stream, " count ", count);
+    LOG_DEBUG("coll ", ccl_coll_type_to_str(param.ctype), " created, req ", req, " count ", count);
     return req;
+}
+
+ccl::event ccl_alltoall(const void* send_buf,
+                        void* recv_buf,
+                        size_t count,
+                        ccl::datatype dtype,
+                        const ccl_coll_attr& attr,
+                        ccl_comm* comm,
+                        const ccl_stream* stream,
+                        const std::vector<ccl::event>& deps) {
+    std::function<ccl::event()> collective =
+        [send_buf, recv_buf, count, dtype, attr, comm, stream, &deps]() -> ccl::event {
+        auto req = ccl_alltoall_impl(send_buf, recv_buf, count, dtype, attr, comm, stream, deps);
+        return std::unique_ptr<ccl::event_impl>(new ccl::host_event_impl(req));
+    };
+#if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE)
+    ccl_selector_param param = ccl_selector_param::create(ccl_coll_alltoall,
+                                                          count,
+                                                          dtype,
+                                                          comm,
+                                                          const_cast<ccl_stream*>(stream),
+                                                          recv_buf,
+                                                          ccl::reduction::custom,
+                                                          false, // is_vector_buf
+                                                          false, // is_sycl_buf
+                                                          CCL_INVALID_PEER_RANK_IDX, // peer_rank
+                                                          {}, // hint_algo
+                                                          false); // is_scaleout
+
+    if (can_use_sycl_kernels(param)) {
+        LOG_DEBUG(
+            "|CCL_SYCL| alltoall selects sycl-kernels send_count: ", count, ", datatype: ", dtype);
+
+        ccl_stream* op_stream = const_cast<ccl_stream*>(stream);
+        auto q = op_stream->get_native_stream();
+        auto dummy_unused_attr = ccl::create_operation_attr<ccl::alltoall_attr>();
+        collective = [=, &q, &deps]() -> ccl::event {
+            bool done = false;
+            ccl::event ccl_event = ccl::alltoall_sycl(q,
+                                                      send_buf,
+                                                      recv_buf,
+                                                      count,
+                                                      dtype,
+                                                      comm,
+                                                      op_stream,
+                                                      dummy_unused_attr,
+                                                      deps,
+                                                      done);
+            if (done) {
+                if (ccl::global_data::env().enable_op_sync) {
+                    ccl_event.wait();
+                }
+                return ccl_event;
+            }
+            return collective();
+        };
+    }
+#endif // CCL_ENABLE_SYCL && CCL_ENABLE_ZE
+    ccl_request* req{};
+    ccl::event event = std::unique_ptr<ccl::event_impl>(
+        new ccl::host_event_impl(req, group_impl::is_group_active));
+    if (group_impl::is_group_active) {
+        auto ctype = ccl_coll_alltoall;
+        if (deps.size() != 0) {
+            LOG_WARN("explicit dependencies are not supported for group calls: ",
+                     ccl_coll_type_to_str(ctype));
+        }
+        group_impl::add_operation(ctype, std::move(collective));
+        // operation will be started later, currently returning empty event
+    }
+    else {
+        event = collective();
+    }
+    return event;
 }
 
 ccl_request* ccl_alltoall_impl(const void* send_buf,
@@ -1202,9 +1458,42 @@ ccl_request* ccl_alltoall_impl(const void* send_buf,
         send_buf, recv_buf, count, dtype, attr, comm, stream, deps);
 
     auto req = ccl_coll_create(param, attr);
-    LOG_DEBUG(
-        "coll ", ccl_coll_type_to_str(param.ctype), " created, req ", stream, " count ", count);
+    LOG_DEBUG("coll ", ccl_coll_type_to_str(param.ctype), " created, req ", req, " count ", count);
     return req;
+}
+
+ccl::event ccl_alltoallv(const void* send_buf,
+                         const size_t* send_counts,
+                         void* recv_buf,
+                         const size_t* recv_counts,
+                         ccl::datatype dtype,
+                         const ccl_coll_attr& attr,
+                         ccl_comm* comm,
+                         const ccl_stream* stream,
+                         const std::vector<ccl::event>& deps) {
+    auto collective =
+        [send_buf, send_counts, recv_buf, recv_counts, dtype, attr, comm, stream, &deps]()
+        -> ccl::event {
+        auto req = ccl_alltoallv_impl(
+            send_buf, send_counts, recv_buf, recv_counts, dtype, attr, comm, stream, deps);
+        return std::unique_ptr<ccl::event_impl>(new ccl::host_event_impl(req));
+    };
+    ccl_request* req{};
+    ccl::event event = std::unique_ptr<ccl::event_impl>(
+        new ccl::host_event_impl(req, group_impl::is_group_active));
+    if (group_impl::is_group_active) {
+        auto ctype = ccl_coll_alltoallv;
+        if (deps.size() != 0) {
+            LOG_WARN("explicit dependencies are not supported for group calls: ",
+                     ccl_coll_type_to_str(ctype));
+        }
+        group_impl::add_operation(ctype, std::move(collective));
+        // operation will be started later, currently returning empty event
+    }
+    else {
+        event = collective();
+    }
+    return event;
 }
 
 ccl_request* ccl_alltoallv_impl(const void* send_buf,
@@ -1222,6 +1511,31 @@ ccl_request* ccl_alltoallv_impl(const void* send_buf,
     auto req = ccl_coll_create(param, attr);
     LOG_DEBUG("coll ", ccl_coll_type_to_str(param.ctype), " created, req ", req);
     return req;
+}
+
+ccl::event ccl_barrier(ccl_comm* comm,
+                       const ccl_stream* stream,
+                       const std::vector<ccl::event>& deps) {
+    auto collective = [comm, stream, &deps]() -> ccl::event {
+        auto req = ccl_barrier_impl(comm, stream, deps);
+        return std::unique_ptr<ccl::event_impl>(new ccl::host_event_impl(req));
+    };
+    ccl_request* req{};
+    ccl::event event = std::unique_ptr<ccl::event_impl>(
+        new ccl::host_event_impl(req, group_impl::is_group_active));
+    if (group_impl::is_group_active) {
+        auto ctype = ccl_coll_barrier;
+        if (deps.size() != 0) {
+            LOG_WARN("explicit dependencies are not supported for group calls: ",
+                     ccl_coll_type_to_str(ctype));
+        }
+        group_impl::add_operation(ctype, std::move(collective));
+        // operation will be started later, currently returning empty event
+    }
+    else {
+        event = collective();
+    }
+    return event;
 }
 
 ccl_request* ccl_barrier_impl(ccl_comm* comm,
@@ -1252,6 +1566,36 @@ ccl_request* ccl_barrier_impl(ccl_comm* comm,
     return req;
 }
 
+ccl::event ccl_broadcast(void* buf,
+                         size_t count,
+                         ccl::datatype dtype,
+                         int root,
+                         const ccl_coll_attr& attr,
+                         ccl_comm* comm,
+                         const ccl_stream* stream,
+                         const std::vector<ccl::event>& deps) {
+    auto collective = [buf, count, dtype, root, attr, comm, stream, &deps]() -> ccl::event {
+        auto req = ccl_broadcast_impl(buf, count, dtype, root, attr, comm, stream, deps);
+        return std::unique_ptr<ccl::event_impl>(new ccl::host_event_impl(req));
+    };
+    ccl_request* req{};
+    ccl::event event = std::unique_ptr<ccl::event_impl>(
+        new ccl::host_event_impl(req, group_impl::is_group_active));
+    if (group_impl::is_group_active) {
+        auto ctype = ccl_coll_bcast;
+        if (deps.size() != 0) {
+            LOG_WARN("explicit dependencies are not supported for group calls: ",
+                     ccl_coll_type_to_str(ctype));
+        }
+        group_impl::add_operation(ctype, std::move(collective));
+        // operation will be started later, currently returning empty event
+    }
+    else {
+        event = collective();
+    }
+    return event;
+}
+
 ccl_request* ccl_broadcast_impl(void* buf,
                                 size_t count,
                                 ccl::datatype dtype,
@@ -1266,6 +1610,39 @@ ccl_request* ccl_broadcast_impl(void* buf,
     auto req = ccl_coll_create(param, attr);
     LOG_DEBUG("coll ", ccl_coll_type_to_str(param.ctype), " created, req ", req);
     return req;
+}
+
+ccl::event ccl_broadcast(void* send_buf,
+                         void* recv_buf,
+                         size_t count,
+                         ccl::datatype dtype,
+                         int root,
+                         const ccl_coll_attr& attr,
+                         ccl_comm* comm,
+                         const ccl_stream* stream,
+                         const std::vector<ccl::event>& deps) {
+    auto collective =
+        [send_buf, recv_buf, count, dtype, root, attr, comm, stream, &deps]() -> ccl::event {
+        auto req =
+            ccl_broadcast_impl(send_buf, recv_buf, count, dtype, root, attr, comm, stream, deps);
+        return std::unique_ptr<ccl::event_impl>(new ccl::host_event_impl(req));
+    };
+    ccl_request* req{};
+    ccl::event event = std::unique_ptr<ccl::event_impl>(
+        new ccl::host_event_impl(req, group_impl::is_group_active));
+    if (group_impl::is_group_active) {
+        auto ctype = ccl_coll_broadcast;
+        if (deps.size() != 0) {
+            LOG_WARN("explicit dependencies are not supported for group calls: ",
+                     ccl_coll_type_to_str(ctype));
+        }
+        group_impl::add_operation(ctype, std::move(collective));
+        // operation will be started later, currently returning empty event
+    }
+    else {
+        event = collective();
+    }
+    return event;
 }
 
 ccl_request* ccl_broadcast_impl(void* send_buf,
@@ -1283,6 +1660,41 @@ ccl_request* ccl_broadcast_impl(void* send_buf,
     auto req = ccl_coll_create(param, attr);
     LOG_DEBUG("coll ", ccl_coll_type_to_str(param.ctype), " created, req ", req);
     return req;
+}
+
+ccl::event ccl_reduce(const void* send_buf,
+                      void* recv_buf,
+                      size_t count,
+                      ccl::datatype dtype,
+                      ccl::reduction reduction,
+                      int root,
+                      const ccl_coll_attr& attr,
+                      ccl_comm* comm,
+                      const ccl_stream* stream,
+                      const std::vector<ccl::event>& deps) {
+    auto collective =
+        [send_buf, recv_buf, count, dtype, reduction, root, attr, comm, stream, &deps]()
+        -> ccl::event {
+        auto req = ccl_reduce_impl(
+            send_buf, recv_buf, count, dtype, reduction, root, attr, comm, stream, deps);
+        return std::unique_ptr<ccl::event_impl>(new ccl::host_event_impl(req));
+    };
+    ccl_request* req{};
+    ccl::event event = std::unique_ptr<ccl::event_impl>(
+        new ccl::host_event_impl(req, group_impl::is_group_active));
+    if (group_impl::is_group_active) {
+        auto ctype = ccl_coll_reduce;
+        if (deps.size() != 0) {
+            LOG_WARN("explicit dependencies are not supported for group calls: ",
+                     ccl_coll_type_to_str(ctype));
+        }
+        group_impl::add_operation(ctype, std::move(collective));
+        // operation will be started later, currently returning empty event
+    }
+    else {
+        event = collective();
+    }
+    return event;
 }
 
 ccl_request* ccl_reduce_impl(const void* send_buf,
@@ -1312,6 +1724,13 @@ ccl::event ccl_reduce_scatter(const void* send_buf,
                               ccl_comm* comm,
                               const ccl_stream* stream,
                               const std::vector<ccl::event>& deps) {
+    std::function<ccl::event()> collective =
+        [send_buf, recv_buf, recv_count, dtype, reduction, attr, comm, stream, &deps]()
+        -> ccl::event {
+        auto req = ccl_reduce_scatter_impl(
+            send_buf, recv_buf, recv_count, dtype, reduction, attr, comm, stream, deps);
+        return std::unique_ptr<ccl::event_impl>(new ccl::host_event_impl(req));
+    };
 #if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE)
     ccl_selector_param param = ccl_selector_param::create(ccl_coll_reduce_scatter,
                                                           recv_count,
@@ -1325,39 +1744,57 @@ ccl::event ccl_reduce_scatter(const void* send_buf,
                                                           CCL_INVALID_PEER_RANK_IDX, // peer_rank
                                                           {}, // hint_algo
                                                           false); // is_scaleout
-
     if (can_use_sycl_kernels(param)) {
+        if (comm->is_multi_thread_instance() == true) {
+            CCL_THROW(
+                "|CCL_SYCL| reduce_scatter is not supported for multithreaded communicator yet");
+        }
         LOG_DEBUG("|CCL_SYCL| reduce_scatter selects sycl-kernels recv_count: ",
                   recv_count,
                   ", datatype: ",
-                  dtype)
-        bool done = false;
+                  dtype);
         ccl_stream* op_stream = const_cast<ccl_stream*>(stream);
         auto q = op_stream->get_native_stream();
         auto dummy_unused_attr = ccl::create_operation_attr<ccl::reduce_scatter_attr>();
-        ccl::event ccl_event = reduce_scatter_sycl(q,
-                                                   send_buf,
-                                                   recv_buf,
-                                                   recv_count,
-                                                   dtype,
-                                                   reduction,
-                                                   comm,
-                                                   const_cast<ccl_stream*>(stream),
-                                                   dummy_unused_attr,
-                                                   deps,
-                                                   done);
-        if (done) {
-            if (ccl::global_data::env().enable_op_sync) {
-                ccl_event.wait();
+        collective = [=, &q, &deps]() -> ccl::event {
+            bool done = false;
+            ccl::event ccl_event = reduce_scatter_sycl(q,
+                                                       send_buf,
+                                                       recv_buf,
+                                                       recv_count,
+                                                       dtype,
+                                                       reduction,
+                                                       comm,
+                                                       const_cast<ccl_stream*>(stream),
+                                                       dummy_unused_attr,
+                                                       deps,
+                                                       done);
+            if (done) {
+                if (ccl::global_data::env().enable_op_sync) {
+                    ccl_event.wait();
+                }
+                return ccl_event;
             }
-            return ccl_event;
-        }
+            return collective();
+        };
     }
 #endif // CCL_ENABLE_SYCL && CCL_ENABLE_ZE
-    ccl_request* req = ccl_reduce_scatter_impl(
-        send_buf, recv_buf, recv_count, dtype, reduction, attr, comm, stream, deps);
-
-    return std::unique_ptr<ccl::event_impl>(new ccl::host_event_impl(req));
+    ccl_request* req{};
+    ccl::event event = std::unique_ptr<ccl::event_impl>(
+        new ccl::host_event_impl(req, group_impl::is_group_active));
+    if (group_impl::is_group_active) {
+        auto ctype = ccl_coll_reduce_scatter;
+        if (deps.size() != 0) {
+            LOG_WARN("explicit dependencies are not supported for group calls: ",
+                     ccl_coll_type_to_str(ctype));
+        }
+        group_impl::add_operation(ctype, std::move(collective));
+        // operation will be started later, currently returning empty event
+    }
+    else {
+        event = collective();
+    }
+    return event;
 }
 
 ccl_request* ccl_reduce_scatter_impl(const void* send_buf,
@@ -1395,11 +1832,13 @@ ccl::event ccl_recv(void* recv_buf,
     ccl::event event = std::unique_ptr<ccl::event_impl>(
         new ccl::host_event_impl(req, group_impl::is_group_active));
     if (group_impl::is_group_active) {
+        auto ctype = ccl_coll_recv;
         if (deps.size() != 0) {
-            LOG_WARN("ccl_recv doesn't expect deps with group calls");
+            LOG_WARN("explicit dependencies are not supported for group calls: ",
+                     ccl_coll_type_to_str(ctype));
         }
-        group_impl::add_operation(ccl_coll_recv, std::move(recv_operation));
-        // async behavior is expected, no need to return event
+        group_impl::add_operation(ctype, std::move(recv_operation));
+        // operation will be started later, currently returning empty event
     }
     else {
         event = recv_operation();
@@ -1443,11 +1882,13 @@ ccl::event ccl_send(const void* send_buf,
     ccl::event event = std::unique_ptr<ccl::event_impl>(
         new ccl::host_event_impl(req, group_impl::is_group_active));
     if (group_impl::is_group_active) {
+        auto ctype = ccl_coll_send;
         if (deps.size() != 0) {
-            LOG_WARN("ccl_send doesn't expect deps with group calls");
+            LOG_WARN("explicit dependencies are not supported for group calls: ",
+                     ccl_coll_type_to_str(ctype));
         }
-        group_impl::add_operation(ccl_coll_send, std::move(send_operation));
-        // async behavior is expected, no need to return event
+        group_impl::add_operation(ctype, std::move(send_operation));
+        // operation will be started later, currently returning empty event
     }
     else {
         event = send_operation();

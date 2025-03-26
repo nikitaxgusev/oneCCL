@@ -116,6 +116,10 @@ void ccl_comm::init(int comm_id,
                     const std::shared_ptr<atl_base_comm>& atl_comm,
                     bool share_resources,
                     bool is_sub_communicator) {
+    if (group_impl::is_group_active) {
+        LOG_WARN("Creating communicator inside group operation");
+    }
+
     comm_rank = atl_comm->get_rank();
     comm_size = atl_comm->get_size();
 
@@ -140,7 +144,7 @@ void ccl_comm::init(int comm_id,
         if (!comm_rank && device_ptr) {
             LOG_INFO("topo_manager:", topo_manager.to_string());
         }
-        create_topo_subcomms();
+        create_topo_subcomms(atl_comm);
 #if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE)
         // init of fd manager is based on node comm,
         // it initializes for every creation of comm in multi comms case
@@ -161,8 +165,18 @@ void ccl_comm::init(int comm_id,
 ccl_comm::ccl_comm(int comm_id,
                    std::shared_ptr<atl_base_comm> atl_comm,
                    bool share_resources,
-                   bool is_sub_communicator) {
-    init(comm_id, std::move(atl_comm), share_resources, is_sub_communicator);
+                   bool is_sub_communicator,
+                   bool is_Ext,
+                   int size,
+                   int rank,
+                   int group_id) {
+    if (is_Ext == true) {
+        // prefix Ext means extension for multi threading
+        initExt(size, rank, comm_id, std::move(atl_comm), share_resources, is_sub_communicator);
+    }
+    else {
+        init(comm_id, std::move(atl_comm), share_resources, is_sub_communicator);
+    }
 }
 
 ccl_comm::ccl_comm(std::shared_ptr<atl_base_comm> atl_comm,
@@ -170,11 +184,23 @@ ccl_comm::ccl_comm(std::shared_ptr<atl_base_comm> atl_comm,
                    bool is_sub_communicator)
         : ccl_comm(atl_comm->create_comm_id(), atl_comm, share_resources, is_sub_communicator) {}
 
-ccl_comm::ccl_comm(device_t device, context_t context, std::shared_ptr<atl_base_comm> atl_comm)
+ccl_comm::ccl_comm(device_t device,
+                   context_t context,
+                   std::shared_ptr<atl_base_comm> atl_comm,
+                   bool is_Ext,
+                   int size,
+                   int rank,
+                   int group_id)
         : device_ptr(std::make_shared<ccl::device>(device)),
           context_ptr(std::make_shared<ccl::context>(context)) {
-    int id = atl_comm->create_comm_id();
-    init(id, std::move(atl_comm));
+    int id = 0;
+    if (is_Ext == true) {
+        initExt(size, rank, id, std::move(atl_comm), false, false, group_id);
+    }
+    else {
+        id = atl_comm->create_comm_id();
+        init(id, std::move(atl_comm));
+    }
 }
 
 ccl_comm::ccl_comm(int size, int rank, ccl::shared_ptr_class<ikvs_wrapper> kvs)
@@ -224,8 +250,7 @@ ccl_comm* ccl_comm::create(int size, ccl::shared_ptr_class<ccl::kvs_interface> k
     return new ccl_comm(size, get_kvs_wrapper(kvs));
 }
 
-void ccl_comm::create_topo_subcomms() {
-    std::shared_ptr<atl_base_comm> atl_comm = get_atl_comm();
+void ccl_comm::create_topo_subcomms(std::shared_ptr<atl_base_comm> atl_comm) {
     r2r_comm = std::shared_ptr<ccl_comm>(create_subcomm(atl_comm->get_r2r_color()));
     node_comm = std::shared_ptr<ccl_comm>(create_subcomm(topo_manager.get_host_idx()));
     even_comm = std::shared_ptr<ccl_comm>(
@@ -244,6 +269,35 @@ ccl_comm* ccl_comm::create_subcomm(int color, int key) const {
     return comm;
 }
 
+ccl_comm* ccl_comm::create_subcomm_split_independent(int color, int key) {
+    std::shared_ptr<atl_base_comm> new_atl_comm = get_atl_comm()->comm_split(color, key);
+    ccl_comm* comm = new ccl_comm();
+    comm->device_ptr = this->device_ptr;
+    comm->context_ptr = this->context_ptr;
+
+    // is_sub_communicator is set to false because the function is creating a new communicator
+    // that is not a sub-communicator. This means that the new communicator will have its own
+    // topology manager and subcommunicators, and it will not inherit these from the parent
+    // communicator. This is necessary to ensure that the new communicator is fully independent.
+    comm->init(
+        new_atl_comm->get_comm_id(), new_atl_comm, true /*share_resources*/, false /*subcomm*/);
+
+    LOG_DEBUG("Base rank: ",
+              get_atl_comm()->get_rank(),
+              ", Color: ",
+              color,
+              ", Old size: ",
+              get_atl_comm()->get_size(),
+              " -> New rank: ",
+              new_atl_comm->get_rank(),
+              ", Color: ",
+              color,
+              ", New size: ",
+              new_atl_comm->get_size());
+    LOG_DEBUG("new subcomm: color ", color, ", ", comm->to_string());
+    return comm;
+}
+
 std::shared_ptr<ccl_comm> ccl_comm::clone_with_new_id(int comm_id) {
     return std::shared_ptr<ccl_comm>(new ccl_comm(*this, comm_id));
 }
@@ -255,16 +309,30 @@ void ccl_comm::allocate_resources() {
     if (ccl::global_data::env().enable_unordered_coll) {
         comm_impl->unordered_coll_manager.reset(new ccl_unordered_coll_manager(*this));
     }
-    ccl::global_data::env().print(rank());
+    ccl::global_data::env().print(rank(), enable_multi_thread_instance);
 }
 
-ccl::comm_interface_ptr ccl_comm::split(const ccl::comm_split_attr& attr) {
-    if (!attr.is_valid<ccl::comm_split_attr_id::color>()) {
+ccl::comm_interface_ptr ccl_comm::split(int color, int key, bool split_external_use) {
+    // Check if color and key are within valid range to avoid overflow
+    if (color < 0) {
         CCL_THROW(std::string(__FUNCTION__) +
-                  " - 'color' split attribute for communicator is not set");
+                  " - Invalid 'color' value for communicator split: must be within 0 and " +
+                  std::to_string(std::numeric_limits<int>::max()));
     }
 
-    auto new_comm = create_subcomm(attr.get<ccl::comm_split_attr_id::color>());
+    if (key < 0) {
+        CCL_THROW(std::string(__FUNCTION__) +
+                  " - Invalid 'key' value for communicator split: must be within 0 and " +
+                  std::to_string(std::numeric_limits<int>::max()));
+    }
+
+    ccl_comm* new_comm = nullptr;
+    if (split_external_use) {
+        new_comm = create_subcomm_split_independent(color, key);
+    }
+    else {
+        new_comm = create_subcomm(color, key);
+    }
 
     return std::shared_ptr<ccl_comm>(new_comm);
 }
@@ -435,10 +503,10 @@ void* ccl_scaleout_host_bufs::get_scaleout_host_buf() {
         CCL_THROW_IF_NOT(get_scaleout_host_buf_size() > 0,
                          "CCL_SCALEOUT_HOST_BUF_SIZE must be greater than zero");
 
+        auto& env = ccl::global_data::env();
         auto& global_data = ccl::global_data::get();
-        switch (ccl::global_data::env().sycl_scaleout_buf_alloc_mode) {
+        switch (env.sycl_scaleout_buf_alloc_mode) {
             case ccl::utils::alloc_mode::hwloc: {
-                auto& env = ccl::global_data::env();
                 // fallback to memalign if worker_affinity is not set by user
                 if (env.worker_affinity_set) {
                     auto worker_count = env.worker_count;
@@ -464,8 +532,14 @@ void* ccl_scaleout_host_bufs::get_scaleout_host_buf() {
     }
 
     auto old_index = index;
-    index = (index + 1) % 3;
+    index = (index + 1) % buf_count;
     return host_bufs[old_index];
+}
+
+void ccl_scaleout_host_bufs::put_scaleout_host_buf(const void* buf) {
+    int old_index = (index + buf_count - 1) % buf_count;
+    CCL_THROW_IF_NOT(host_bufs[old_index] == buf, "put_scaleout_host_buf in wrong order");
+    index = old_index;
 }
 
 size_t ccl_scaleout_host_bufs::get_scaleout_host_buf_size() {
@@ -617,13 +691,13 @@ ccl_scaleout_device_bufs& ccl_scaleout_device_bufs::operator=(
 }
 
 void ccl_scaleout_pipeline_bufs::allocate_pipe_chunks(int num_bufs) {
-    assert(num_chunk_buffs == num_bufs);
-    if (send_pipe_buffer)
+    CCL_ASSERT(num_chunk_buffs == num_bufs);
+    if (send_pipe_buffer || recv_pipe_buffer)
         return;
 
     auto& env = ccl::global_data::env();
     auto& global_data = ccl::global_data::get();
-    size_t chunk_size = ccl::global_data::env().sycl_pipeline_chunk_size;
+    size_t max_chunk_size = env.sycl_max_pipeline_chunk_size;
     switch (env.sycl_scaleout_buf_alloc_mode) {
         case ccl::utils::alloc_mode::hwloc: {
             // fallback to memalign if worker_affinity is not set by user
@@ -632,22 +706,23 @@ void ccl_scaleout_pipeline_bufs::allocate_pipe_chunks(int num_bufs) {
                 int numa_node_os_idx =
                     env.worker_mem_affinity[global_data.get_local_proc_idx() * worker_count];
                 send_pipe_buffer = global_data.hwloc_wrapper->alloc_memory(
-                    CCL_REG_MSG_ALIGNMENT, num_chunk_buffs * chunk_size, numa_node_os_idx);
+                    CCL_REG_MSG_ALIGNMENT, num_chunk_buffs * max_chunk_size, numa_node_os_idx);
                 recv_pipe_buffer = global_data.hwloc_wrapper->alloc_memory(
-                    CCL_REG_MSG_ALIGNMENT, num_chunk_buffs * chunk_size, numa_node_os_idx);
+                    CCL_REG_MSG_ALIGNMENT, num_chunk_buffs * max_chunk_size, numa_node_os_idx);
                 break;
             }
+            [[fallthrough]];
         }
         case ccl::utils::alloc_mode::memalign: {
             // internally, CCL_MALLOC calls posix_memalign
             send_pipe_buffer =
-                CCL_MALLOC(num_chunk_buffs * chunk_size, "ccl_scaleout_pipeline_bufs");
+                CCL_MALLOC(num_chunk_buffs * max_chunk_size, "ccl_scaleout_pipeline_bufs");
             recv_pipe_buffer =
-                CCL_MALLOC(num_chunk_buffs * chunk_size, "ccl_scaleout_pipeline_bufs");
+                CCL_MALLOC(num_chunk_buffs * max_chunk_size, "ccl_scaleout_pipeline_bufs");
         } break;
         case ccl::utils::alloc_mode::malloc: {
-            send_pipe_buffer = malloc(num_chunk_buffs * chunk_size);
-            recv_pipe_buffer = malloc(num_chunk_buffs * chunk_size);
+            send_pipe_buffer = malloc(num_chunk_buffs * max_chunk_size);
+            recv_pipe_buffer = malloc(num_chunk_buffs * max_chunk_size);
         } break;
         default: CCL_THROW("unexpected alloc_mode");
     }
@@ -655,18 +730,20 @@ void ccl_scaleout_pipeline_bufs::allocate_pipe_chunks(int num_bufs) {
     CCL_THROW_IF_NOT(recv_pipe_buffer, "malloc recv_pipe_buffer failed");
     if (global_data.ze_data->external_pointer_registration_enabled) {
         global_data.ze_data->import_external_pointer(send_pipe_buffer,
-                                                     num_chunk_buffs * chunk_size);
+                                                     num_chunk_buffs * max_chunk_size);
         global_data.ze_data->import_external_pointer(recv_pipe_buffer,
-                                                     num_chunk_buffs * chunk_size);
+                                                     num_chunk_buffs * max_chunk_size);
     }
     for (int i = 0; i < num_chunk_buffs; i++) {
-        send_pipe_chunks[i] = (char*)send_pipe_buffer + i * chunk_size;
-        recv_pipe_chunks[i] = (char*)recv_pipe_buffer + i * chunk_size;
+        send_pipe_chunks[i] = (char*)send_pipe_buffer + i * max_chunk_size;
+        recv_pipe_chunks[i] = (char*)recv_pipe_buffer + i * max_chunk_size;
     }
 }
 
 ccl_scaleout_pipeline_bufs::~ccl_scaleout_pipeline_bufs() {
-    if (send_pipe_buffer) {
+    if (!send_pipe_buffer || !recv_pipe_buffer)
+        return;
+    try {
         auto& global_data = ccl::global_data::get();
         if (global_data.ze_data->external_pointer_registration_enabled) {
             global_data.ze_data->release_imported_pointer(send_pipe_buffer);
@@ -680,6 +757,7 @@ ccl_scaleout_pipeline_bufs::~ccl_scaleout_pipeline_bufs() {
                     global_data.hwloc_wrapper->dealloc_memory(recv_pipe_buffer);
                     break;
                 }
+                [[fallthrough]];
             };
             case ccl::utils::alloc_mode::memalign: {
                 CCL_FREE(send_pipe_buffer);
@@ -694,33 +772,39 @@ ccl_scaleout_pipeline_bufs::~ccl_scaleout_pipeline_bufs() {
                 LOG_ERROR("unexpected alloc_mode");
         }
     }
+    catch (const std::exception& e) {
+        // printing warning since we are towards the end of execution
+        LOG_WARN("exception caught in the destructor of scaleout pipeline buffers: ", e.what());
+    }
 }
 
 ccl_scaleout_pipeline_bufs::ccl_scaleout_pipeline_bufs(const ccl_scaleout_pipeline_bufs& other) {
-    size_t chunk_size = ccl::global_data::env().sycl_pipeline_chunk_size;
+    size_t max_chunk_size = ccl::global_data::env().sycl_max_pipeline_chunk_size;
     if (other.send_pipe_buffer) {
-        send_pipe_buffer = CCL_MALLOC(num_chunk_buffs * chunk_size, "ccl_scaleout_pipeline_bufs");
+        send_pipe_buffer =
+            CCL_MALLOC(num_chunk_buffs * max_chunk_size, "ccl_scaleout_pipeline_bufs");
         CCL_THROW_IF_NOT(send_pipe_buffer, "malloc scaleout_device_buf failed");
-        std::memcpy(send_pipe_buffer, other.send_pipe_buffer, num_chunk_buffs * chunk_size);
+        std::memcpy(send_pipe_buffer, other.send_pipe_buffer, num_chunk_buffs * max_chunk_size);
         ccl::global_data::get().ze_data->import_external_pointer(send_pipe_buffer,
-                                                                 num_chunk_buffs * chunk_size);
+                                                                 num_chunk_buffs * max_chunk_size);
 
         for (int i = 0; i < num_chunk_buffs; i++) {
-            send_pipe_chunks[i] = (char*)send_pipe_buffer + i * chunk_size;
+            send_pipe_chunks[i] = (char*)send_pipe_buffer + i * max_chunk_size;
         }
     }
 
     if (other.recv_pipe_buffer) {
-        recv_pipe_buffer = CCL_MALLOC(num_chunk_buffs * chunk_size, "ccl_scaleout_pipeline_bufs");
+        recv_pipe_buffer =
+            CCL_MALLOC(num_chunk_buffs * max_chunk_size, "ccl_scaleout_pipeline_bufs");
         if (!recv_pipe_buffer) {
             CCL_THROW_IF_NOT(recv_pipe_buffer, "malloc scaleout_device_buf failed");
         }
-        std::memcpy(recv_pipe_buffer, other.recv_pipe_buffer, num_chunk_buffs * chunk_size);
+        std::memcpy(recv_pipe_buffer, other.recv_pipe_buffer, num_chunk_buffs * max_chunk_size);
         ccl::global_data::get().ze_data->import_external_pointer(recv_pipe_buffer,
-                                                                 num_chunk_buffs * chunk_size);
+                                                                 num_chunk_buffs * max_chunk_size);
 
         for (int i = 0; i < num_chunk_buffs; i++) {
-            recv_pipe_chunks[i] = (char*)recv_pipe_buffer + i * chunk_size;
+            recv_pipe_chunks[i] = (char*)recv_pipe_buffer + i * max_chunk_size;
         }
     }
 }
@@ -740,29 +824,31 @@ ccl_scaleout_pipeline_bufs& ccl_scaleout_pipeline_bufs::operator=(
         recv_pipe_buffer = nullptr;
     }
 
-    size_t chunk_size = ccl::global_data::env().sycl_pipeline_chunk_size;
+    size_t max_chunk_size = ccl::global_data::env().sycl_max_pipeline_chunk_size;
 
     if (other.send_pipe_buffer) {
-        send_pipe_buffer = CCL_MALLOC(num_chunk_buffs * chunk_size, "ccl_scaleout_pipeline_bufs");
+        send_pipe_buffer =
+            CCL_MALLOC(num_chunk_buffs * max_chunk_size, "ccl_scaleout_pipeline_bufs");
         CCL_THROW_IF_NOT(send_pipe_buffer, "malloc scaleout_device_buf failed");
-        std::memcpy(send_pipe_buffer, other.send_pipe_buffer, num_chunk_buffs * chunk_size);
+        std::memcpy(send_pipe_buffer, other.send_pipe_buffer, num_chunk_buffs * max_chunk_size);
         ccl::global_data::get().ze_data->import_external_pointer(send_pipe_buffer,
-                                                                 num_chunk_buffs * chunk_size);
+                                                                 num_chunk_buffs * max_chunk_size);
 
         for (int i = 0; i < num_chunk_buffs; i++) {
-            send_pipe_chunks[i] = (char*)send_pipe_buffer + i * chunk_size;
+            send_pipe_chunks[i] = (char*)send_pipe_buffer + i * max_chunk_size;
         }
     }
 
     if (other.recv_pipe_buffer) {
-        recv_pipe_buffer = CCL_MALLOC(num_chunk_buffs * chunk_size, "ccl_scaleout_pipeline_bufs");
+        recv_pipe_buffer =
+            CCL_MALLOC(num_chunk_buffs * max_chunk_size, "ccl_scaleout_pipeline_bufs");
         CCL_THROW_IF_NOT(recv_pipe_buffer, "malloc scaleout_device_buf failed");
-        std::memcpy(recv_pipe_buffer, other.recv_pipe_buffer, num_chunk_buffs * chunk_size);
+        std::memcpy(recv_pipe_buffer, other.recv_pipe_buffer, num_chunk_buffs * max_chunk_size);
         ccl::global_data::get().ze_data->import_external_pointer(recv_pipe_buffer,
-                                                                 num_chunk_buffs * chunk_size);
+                                                                 num_chunk_buffs * max_chunk_size);
 
         for (int i = 0; i < num_chunk_buffs; i++) {
-            recv_pipe_chunks[i] = (char*)recv_pipe_buffer + i * chunk_size;
+            recv_pipe_chunks[i] = (char*)recv_pipe_buffer + i * max_chunk_size;
         }
     }
 
@@ -781,8 +867,7 @@ ccl::event ccl_comm::barrier(const ccl::stream::impl_value_t& stream,
 ccl::event ccl_comm::barrier_impl(const ccl::stream::impl_value_t& stream,
                                   const ccl::barrier_attr& attr,
                                   const ccl::vector_class<ccl::event>& deps) {
-    ccl_request* req = ccl_barrier_impl(this, stream.get(), deps);
-    return std::unique_ptr<ccl::event_impl>(new ccl::host_event_impl(req));
+    return ccl_barrier(this, stream.get(), deps);
 }
 
 /* allgather */
@@ -793,10 +878,8 @@ ccl::event ccl_comm::allgather_impl(const void* send_buf,
                                     const ccl::stream::impl_value_t& stream,
                                     const ccl::allgather_attr& attr,
                                     const ccl::vector_class<ccl::event>& deps) {
-    ccl_request* req = ccl_allgather_impl(
+    return ccl_allgather(
         send_buf, recv_buf, count, dtype, attr, this, get_stream_ptr(stream), deps);
-
-    return std::unique_ptr<ccl::event_impl>(new ccl::host_event_impl(req));
 }
 
 ccl::event ccl_comm::allgather_impl(const void* send_buf,
@@ -809,16 +892,14 @@ ccl::event ccl_comm::allgather_impl(const void* send_buf,
     ccl_coll_attr internal_attr(attr);
     internal_attr.is_vector_buf = 1;
 
-    ccl_request* req = ccl_allgather_impl(reinterpret_cast<const void*>(send_buf),
-                                          (void*)(recv_buf.data()),
-                                          count,
-                                          dtype,
-                                          internal_attr,
-                                          this,
-                                          get_stream_ptr(stream),
-                                          deps);
-
-    return std::unique_ptr<ccl::event_impl>(new ccl::host_event_impl(req));
+    return ccl_allgather(reinterpret_cast<const void*>(send_buf),
+                         (void*)(recv_buf.data()),
+                         count,
+                         dtype,
+                         internal_attr,
+                         this,
+                         get_stream_ptr(stream),
+                         deps);
 }
 
 /* allgatherv */
@@ -884,10 +965,7 @@ ccl::event ccl_comm::alltoall_impl(const void* send_buf,
                                    const ccl::stream::impl_value_t& stream,
                                    const ccl::alltoall_attr& attr,
                                    const ccl::vector_class<ccl::event>& deps) {
-    ccl_request* req = ccl_alltoall_impl(
-        send_buf, recv_buf, count, dtype, attr, this, get_stream_ptr(stream), deps);
-
-    return std::unique_ptr<ccl::event_impl>(new ccl::host_event_impl(req));
+    return ccl_alltoall(send_buf, recv_buf, count, dtype, attr, this, get_stream_ptr(stream), deps);
 }
 
 ccl::event ccl_comm::alltoall_impl(const ccl::vector_class<void*>& send_buf,
@@ -900,16 +978,14 @@ ccl::event ccl_comm::alltoall_impl(const ccl::vector_class<void*>& send_buf,
     ccl_coll_attr internal_attr(attr);
     internal_attr.is_vector_buf = 1;
 
-    ccl_request* req = ccl_alltoall_impl((void*)(send_buf.data()),
-                                         (void*)(recv_buf.data()),
-                                         count,
-                                         dtype,
-                                         internal_attr,
-                                         this,
-                                         get_stream_ptr(stream),
-                                         deps);
-
-    return std::unique_ptr<ccl::event_impl>(new ccl::host_event_impl(req));
+    return ccl_alltoall((void*)(send_buf.data()),
+                        (void*)(recv_buf.data()),
+                        count,
+                        dtype,
+                        internal_attr,
+                        this,
+                        get_stream_ptr(stream),
+                        deps);
 }
 
 /* alltoallv */
@@ -921,17 +997,15 @@ ccl::event ccl_comm::alltoallv_impl(const void* send_buf,
                                     const ccl::stream::impl_value_t& stream,
                                     const ccl::alltoallv_attr& attr,
                                     const ccl::vector_class<ccl::event>& deps) {
-    ccl_request* req = ccl_alltoallv_impl(send_buf,
-                                          send_counts.data(),
-                                          recv_buf,
-                                          recv_counts.data(),
-                                          dtype,
-                                          attr,
-                                          this,
-                                          get_stream_ptr(stream),
-                                          deps);
-
-    return std::unique_ptr<ccl::event_impl>(new ccl::host_event_impl(req));
+    return ccl_alltoallv(send_buf,
+                         send_counts.data(),
+                         recv_buf,
+                         recv_counts.data(),
+                         dtype,
+                         attr,
+                         this,
+                         get_stream_ptr(stream),
+                         deps);
 }
 
 ccl::event ccl_comm::alltoallv_impl(const ccl::vector_class<void*>& send_buf,
@@ -945,17 +1019,15 @@ ccl::event ccl_comm::alltoallv_impl(const ccl::vector_class<void*>& send_buf,
     ccl_coll_attr internal_attr(attr);
     internal_attr.is_vector_buf = 1;
 
-    ccl_request* req = ccl_alltoallv_impl((void*)send_buf.data(),
-                                          send_counts.data(),
-                                          (void*)recv_buf.data(),
-                                          recv_counts.data(),
-                                          dtype,
-                                          internal_attr,
-                                          this,
-                                          get_stream_ptr(stream),
-                                          deps);
-
-    return std::unique_ptr<ccl::event_impl>(new ccl::host_event_impl(req));
+    return ccl_alltoallv((void*)send_buf.data(),
+                         send_counts.data(),
+                         (void*)recv_buf.data(),
+                         recv_counts.data(),
+                         dtype,
+                         internal_attr,
+                         this,
+                         get_stream_ptr(stream),
+                         deps);
 }
 
 /* bcast */
@@ -966,10 +1038,7 @@ ccl::event ccl_comm::broadcast_impl(void* buf,
                                     const ccl::stream::impl_value_t& stream,
                                     const ccl::broadcast_attr& attr,
                                     const ccl::vector_class<ccl::event>& deps) {
-    ccl_request* req =
-        ccl_broadcast_impl(buf, count, dtype, root, attr, this, get_stream_ptr(stream), deps);
-
-    return std::unique_ptr<ccl::event_impl>(new ccl::host_event_impl(req));
+    return ccl_broadcast(buf, count, dtype, root, attr, this, get_stream_ptr(stream), deps);
 }
 
 /* broadcast */
@@ -981,10 +1050,8 @@ ccl::event ccl_comm::broadcast_impl(void* send_buf,
                                     const ccl::stream::impl_value_t& stream,
                                     const ccl::broadcast_attr& attr,
                                     const ccl::vector_class<ccl::event>& deps) {
-    ccl_request* req = ccl_broadcast_impl(
+    return ccl_broadcast(
         send_buf, recv_buf, count, dtype, root, attr, this, get_stream_ptr(stream), deps);
-
-    return std::unique_ptr<ccl::event_impl>(new ccl::host_event_impl(req));
 }
 
 /* reduce */
@@ -997,18 +1064,16 @@ ccl::event ccl_comm::reduce_impl(const void* send_buf,
                                  const ccl::stream::impl_value_t& stream,
                                  const ccl::reduce_attr& attr,
                                  const ccl::vector_class<ccl::event>& deps) {
-    ccl_request* req = ccl_reduce_impl(send_buf,
-                                       recv_buf,
-                                       count,
-                                       dtype,
-                                       reduction,
-                                       root,
-                                       attr,
-                                       this,
-                                       get_stream_ptr(stream),
-                                       deps);
-
-    return std::unique_ptr<ccl::event_impl>(new ccl::host_event_impl(req));
+    return ccl_reduce(send_buf,
+                      recv_buf,
+                      count,
+                      dtype,
+                      reduction,
+                      root,
+                      attr,
+                      this,
+                      get_stream_ptr(stream),
+                      deps);
 }
 
 /* reduce_scatter */

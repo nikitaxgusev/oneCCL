@@ -193,7 +193,8 @@ public:
                                     int local_count) = 0;
 
     virtual atl_status_t get_rank2proc_map(std::shared_ptr<ipmi> pmi,
-                                           std::vector<int>& rank2proc_map) = 0;
+                                           std::vector<int>& rank2proc_map,
+                                           atl_proc_coord_t coord) = 0;
 
     virtual std::string to_string() = 0;
 

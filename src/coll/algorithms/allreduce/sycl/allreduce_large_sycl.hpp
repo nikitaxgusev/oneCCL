@@ -335,30 +335,51 @@ void nocopy_sum_and_distribute_to_remote_ranks(int *even_ranks,
     using namespace __ESIMD_ENS;
 
     //read the input data
-    uint32_t read_offset = (idx + threads_already_processed) * SIMD_COMPUTE * TEMP_WORLD;
     int is_odd = (even_ranks[0] == 1);
+    uint32_t read_offset = (idx + threads_already_processed) * SIMD_COMPUTE * TEMP_WORLD +
+                           is_odd * SIMD_COMPUTE * TEMP_WORLD / 2;
+    if (read_offset >= size) {
+        return;
+    }
+
     //read the input data
-    data_type *ptr_even =
-        (data_type *)in_buffers[temp_rank & 0xfffffffe] + is_odd * SIMD_COMPUTE * TEMP_WORLD / 2;
-    data_type *ptr_odd =
-        (data_type *)in_buffers[temp_rank | 1] + is_odd * SIMD_COMPUTE * TEMP_WORLD / 2;
+    data_type *ptr_even = (data_type *)in_buffers[temp_rank & 0xfffffffe];
+    data_type *ptr_odd = (data_type *)in_buffers[temp_rank | 1];
     simd<data_type, SIMD_COMPUTE * TEMP_WORLD / 2> sum;
     simd<data_type, SIMD_COMPUTE * TEMP_WORLD> buffer;
     uint32_t i;
+    if (read_offset + (TEMP_WORLD / 2) * SIMD_COMPUTE <= size) {
 #pragma unroll
-    for (i = 0; i < TEMP_WORLD / 2; i++) {
-        buffer.template select<SIMD_COMPUTE, 1>(SIMD_COMPUTE * i) =
-            block_load<data_type, SIMD_COMPUTE>(
-                (data_type *)ptr_even + read_offset + i * SIMD_COMPUTE,
-                properties{ alignment<align> });
-    }
+        for (i = 0; i < TEMP_WORLD / 2; i++) {
+            buffer.template select<SIMD_COMPUTE, 1>(SIMD_COMPUTE * i) =
+                block_load<data_type, SIMD_COMPUTE>(
+                    (data_type *)ptr_even + read_offset + i * SIMD_COMPUTE,
+                    properties{ alignment<align> });
+        }
 #pragma unroll
-    for (i = TEMP_WORLD / 2; i < TEMP_WORLD; i++) {
-        buffer.template select<SIMD_COMPUTE, 1>(SIMD_COMPUTE * i) =
-            block_load<data_type, SIMD_COMPUTE>(
-                (data_type *)ptr_odd + read_offset + (i - TEMP_WORLD / 2) * SIMD_COMPUTE,
-                properties{ alignment<align> });
+        for (i = TEMP_WORLD / 2; i < TEMP_WORLD; i++) {
+            buffer.template select<SIMD_COMPUTE, 1>(SIMD_COMPUTE * i) =
+                block_load<data_type, SIMD_COMPUTE>(
+                    (data_type *)ptr_odd + read_offset + (i - TEMP_WORLD / 2) * SIMD_COMPUTE,
+                    properties{ alignment<align> });
+        }
     }
+    else {
+        int count = (size - read_offset + SIMD_COMPUTE - 1) / SIMD_COMPUTE;
+        for (i = 0; i < count; i++) {
+            buffer.template select<SIMD_COMPUTE, 1>(SIMD_COMPUTE * i) =
+                block_load<data_type, SIMD_COMPUTE>(
+                    (data_type *)ptr_even + read_offset + i * SIMD_COMPUTE,
+                    properties{ alignment<align> });
+        }
+        for (i = TEMP_WORLD / 2; i < TEMP_WORLD / 2 + count; i++) {
+            buffer.template select<SIMD_COMPUTE, 1>(SIMD_COMPUTE * i) =
+                block_load<data_type, SIMD_COMPUTE>(
+                    (data_type *)ptr_odd + read_offset + (i - TEMP_WORLD / 2) * SIMD_COMPUTE,
+                    properties{ alignment<align> });
+        }
+    }
+
     sum = buffer.template select<SIMD_COMPUTE * TEMP_WORLD / 2, 1>(0) +
           buffer.template select<SIMD_COMPUTE * TEMP_WORLD / 2, 1>(SIMD_COMPUTE * TEMP_WORLD / 2);
 

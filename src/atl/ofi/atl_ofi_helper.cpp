@@ -14,6 +14,7 @@
  limitations under the License.
 */
 #include "atl_ofi_helper.hpp"
+#include "common/api_wrapper/pmix_api_wrapper.hpp"
 
 atl_ofi_global_data_t global_data;
 
@@ -151,60 +152,111 @@ atl_status_t atl_ofi_get_local_proc_coord(atl_proc_coord_t& coord, std::shared_p
              "-%d",
              my_global_proc_idx);
 
-    ret = pmi->pmrt_kvs_put((char*)ATL_OFI_HOSTNAME_PM_KEY,
-                            my_global_proc_idx * ATL_OFI_PMI_PROC_MULTIPLIER,
-                            my_hostname,
-                            ATL_MAX_HOSTNAME_LEN);
-
-    if (ret) {
-        LOG_ERROR("pmrt_kvs_put: ret: ", ret);
-        goto fn_err;
-    }
-
-    ATL_CHECK_STATUS(pmi->pmrt_barrier(), "barrier failed");
-
     all_hostnames = (char*)calloc(1, coord.global_count * ATL_MAX_HOSTNAME_LEN);
     if (!all_hostnames) {
-        LOG_ERROR("can't allocate all_hostnames");
+        LOG_ERROR("Failed to allocate memory for all_hostnames");
         goto fn_err;
     }
 
-    for (i = 0; i < coord.global_count; i++) {
-        ret = pmi->pmrt_kvs_get((char*)ATL_OFI_HOSTNAME_PM_KEY,
-                                i * ATL_OFI_PMI_PROC_MULTIPLIER,
-                                all_hostnames + i * ATL_MAX_HOSTNAME_LEN,
+    if (ccl::global_data::env().kvs_init_mode == ccl::kvs_mode::pmix_ofi &&
+        ccl::global_data::env().enable_init_hostname_sharing) {
+        LOG_DEBUG("using PMIx for hostname exchange");
+
+        // PMIx-based sharing
+        pmix_value_t value;
+        PMIX_VALUE_CONSTRUCT(&value);
+        ccl_pmix::value_load(value, my_hostname, PMIX_STRING);
+
+        int key_put = my_global_proc_idx * ATL_OFI_PMI_PROC_MULTIPLIER;
+        std::string key_put_str = std::string(ATL_OFI_HOSTNAME_PM_KEY) + std::to_string(key_put);
+
+        ccl_pmix::put(key_put_str, value);
+
+        ccl_pmix::commit();
+        ccl_pmix::fence(ccl::global_proc.nspace, pmi->get_rank(), pmi->get_size());
+
+        for (int i = 0; i < coord.global_count; i++) {
+            int key_get = i * ATL_OFI_PMI_PROC_MULTIPLIER;
+            std::string key_get_str =
+                std::string(ATL_OFI_HOSTNAME_PM_KEY) + std::to_string(key_get);
+            pmix_value_t* ret_value = nullptr;
+            ccl_pmix::get(ccl::global_proc.nspace, i, key_get_str, &ret_value);
+            strncpy(all_hostnames + i * ATL_MAX_HOSTNAME_LEN,
+                    ret_value->data.string,
+                    ATL_MAX_HOSTNAME_LEN - 1);
+            PMIX_VALUE_RELEASE(ret_value);
+        }
+    }
+    else if (ccl::global_data::env().enable_init_hostname_sharing) {
+        LOG_DEBUG("using PMI for hostname exchange");
+        // PMI-based sharing
+        ret = pmi->pmrt_kvs_put((char*)ATL_OFI_HOSTNAME_PM_KEY,
+                                my_global_proc_idx * ATL_OFI_PMI_PROC_MULTIPLIER,
+                                my_hostname,
                                 ATL_MAX_HOSTNAME_LEN);
+
         if (ret) {
-            LOG_ERROR("pmrt_kvs_get: ret: ", ret);
+            LOG_ERROR("pmrt_kvs_put: ret: ", ret);
             goto fn_err;
         }
-    }
-    /* initialize the map with all local ids invalid */
-    coord.global2local_map.clear();
-    coord.global2local_map.resize(coord.global_count, -1);
-    for (i = 0; i < coord.global_count; i++) {
-        if (!strncmp(my_hostname,
-                     all_hostnames + i * ATL_MAX_HOSTNAME_LEN,
-                     my_hostname_len + 1 /* including "-" at the end */)) {
-            local_count++;
-            int peer_global_proc_idx;
-            sscanf(all_hostnames + i * ATL_MAX_HOSTNAME_LEN + my_hostname_len + 1,
-                   "%d",
-                   &peer_global_proc_idx);
-            /* mark the global ids of local node ranks as valid */
-            coord.global2local_map[peer_global_proc_idx] = 1;
-            if (my_global_proc_idx > peer_global_proc_idx)
-                local_idx++;
+
+        ATL_CHECK_STATUS(pmi->pmrt_barrier(), "barrier failed");
+
+        for (i = 0; i < coord.global_count; i++) {
+            ret = pmi->pmrt_kvs_get((char*)ATL_OFI_HOSTNAME_PM_KEY,
+                                    i * ATL_OFI_PMI_PROC_MULTIPLIER,
+                                    all_hostnames + i * ATL_MAX_HOSTNAME_LEN,
+                                    ATL_MAX_HOSTNAME_LEN);
+            if (ret) {
+                LOG_ERROR("pmrt_kvs_get: ret: ", ret);
+                goto fn_err;
+            }
         }
     }
+    else {
+        LOG_DEBUG("disable hostname exchange to get local coords");
+    }
 
-    coord.local_idx = local_idx;
-    coord.local_count = local_count;
+    // Initialize the map with all local ids invalid
+    coord.global2local_map.clear();
+    coord.global2local_map.resize(coord.global_count, -1);
+
+    if (ccl::global_data::env().enable_init_hostname_sharing) {
+        for (i = 0; i < coord.global_count; i++) {
+            if (!strncmp(my_hostname,
+                         all_hostnames + i * ATL_MAX_HOSTNAME_LEN,
+                         my_hostname_len + 1 /* including "-" at the end */)) {
+                local_count++;
+                int peer_global_proc_idx;
+                sscanf(all_hostnames + i * ATL_MAX_HOSTNAME_LEN + my_hostname_len + 1,
+                       "%d",
+                       &peer_global_proc_idx);
+                // Mark the global ids of local node ranks as valid
+                coord.global2local_map[peer_global_proc_idx] = 1;
+                if (my_global_proc_idx > peer_global_proc_idx)
+                    local_idx++;
+            }
+        }
+    }
+    // The initial approach for obtaining local coordinates involves hostname
+    // sharing, where the current hostname is compared with shared hostnames to
+    // calculate the local count and rank. The environment variable enable_init_hostname_sharing
+    // determines whether this method is used or if the coordinates are instead retrieved
+    // from PMIX_LOCAL_RANK and PMIX_LOCAL_SIZE, queried via the PMIx API during the initialization
+    // phase of OneCCL in the global data. By default, the second approach is preferred
+    // as it eliminates the need for additional data exchange.
+    coord.local_idx = ccl::global_data::env().enable_init_hostname_sharing
+                          ? local_idx
+                          : ccl::global_data::get().get_local_proc_idx();
+    coord.local_count = ccl::global_data::env().enable_init_hostname_sharing
+                            ? local_count
+                            : ccl::global_data::get().get_local_proc_count();
 
     local_idx = 0;
-    /* assign local ids to local node ranks */
+    // Assign local ids to local node ranks
     for (i = 0; i < coord.global_count; i++) {
-        if (coord.global2local_map[i] == 1) {
+        if (coord.global2local_map[i] == 1 ||
+            !ccl::global_data::env().enable_init_hostname_sharing) {
             coord.global2local_map[i] = local_idx;
             local_idx++;
         }
@@ -223,27 +275,35 @@ atl_status_t atl_ofi_prov_update_addr_table(atl_ofi_ctx_t& ctx,
                                             const atl_proc_coord_t& coord,
                                             size_t prov_idx,
                                             std::shared_ptr<ipmi> pmi,
-                                            ep_names_t& ep_names) {
+                                            ep_names_t& ep_names,
+                                            void* shared_memory = nullptr,
+                                            size_t length = 0,
+                                            size_t total_named_eps = 0,
+                                            size_t local_addr_offset = 0,
+                                            size_t global_addr_offset = 0,
+                                            int cur_comm_id = 0) {
     atl_ofi_prov_t* prov = &(ctx.provs[prov_idx]);
-
     atl_status_t ret = ATL_STATUS_SUCCESS;
-    int i;
-    size_t j;
-    int insert_count;
-
     size_t addr_idx = 0;
-    char* ep_names_table;
-    char* next_ep_name = 0;
-    size_t ep_names_table_len;
-
-    size_t named_ep_count = (prov->sep ? 1 : ctx.ep_count);
-
-    int proc_count = prov->is_shm ? coord.local_count : coord.global_count;
-    /* shm provider address length is variable and hence allocate maximum size */
+    int insert_count = 0;
+    char* ep_names_table = nullptr;
+    char* next_ep_name = nullptr;
     int addr_len = prov->is_shm ? static_cast<int>(FI_NAME_MAX) : prov->addr_len;
-
+    size_t named_ep_count = (prov->sep ? 1 : ctx.ep_count);
+    int proc_count = prov->is_shm ? coord.local_count : coord.global_count;
     if (proc_count == 0)
         return ATL_STATUS_SUCCESS;
+
+    size_t ep_names_table_len = addr_len * named_ep_count * proc_count;
+    if (ep_names_table_len == 0) {
+        LOG_ERROR("ep_names_table_len == 0, addr_len ",
+                  prov->addr_len,
+                  ", named_ep_count ",
+                  named_ep_count,
+                  ", proc_count ",
+                  proc_count);
+        return ATL_STATUS_FAILURE;
+    }
 
     LOG_DEBUG("name ",
               atl_ofi_get_nic_name(prov->info),
@@ -258,88 +318,199 @@ atl_status_t atl_ofi_prov_update_addr_table(atl_ofi_ctx_t& ctx,
               ", proc_count ",
               proc_count);
 
-    /* allocate OFI EP names table that will contain all published names */
-    ep_names_table_len = addr_len * named_ep_count * proc_count;
+    if (ccl::global_data::env().kvs_init_mode == ccl::kvs_mode::pmix_ofi_shm) {
+        int global_size = pmi->get_size();
+        int global_rank = coord.global_idx;
+        int local_rank = coord.local_idx;
+        int local_size = coord.local_count;
 
-    if (ep_names_table_len == 0) {
-        LOG_ERROR("ep_names_table_len == 0, addr_len ",
-                  prov->addr_len,
-                  ", named_ep_count ",
-                  named_ep_count,
-                  ", proc_count ",
-                  proc_count);
-        return ATL_STATUS_FAILURE;
-    }
+        char* shm_base = static_cast<char*>(shared_memory);
 
-    ep_names_table = (char*)calloc(1, ep_names_table_len);
-    if (!ep_names_table) {
-        LOG_ERROR("can't allocate epnames_table");
-        return ATL_STATUS_FAILURE;
-    }
+        // Now, each rank fetches the remote addresses it needs via PMIx individually.
+        // The logic: For all global ranks that this process cares about,
+        // do a PMIx Get for each "RANK_EP_ADDRS_<global_rank>" key.
+        //
+        // After fetching, store them into the global section of the shared memory so that other
+        // local ranks can also read them without additional PMIx gets.
+        auto* bar_mem = static_cast<barrier_mem_t*>(shared_memory);
+        shm_barrier((void*)&bar_mem->all_comms, local_size, 0);
+        LOG_DEBUG("Barrier before fetching remote data from PMIx");
 
-    /* variable initialization must happen before the first *goto* statement */
-    std::vector<char> ret_ep_name(addr_len, '\0');
+        ATL_CHECK_STATUS(fetch_and_populate_remote_data(shared_memory,
+                                                        local_size,
+                                                        global_size,
+                                                        global_rank,
+                                                        local_rank,
+                                                        total_named_eps,
+                                                        addr_len,
+                                                        local_addr_offset,
+                                                        global_addr_offset,
+                                                        shm_base,
+                                                        length),
+                         "fetch_and_populate_remote_data failed");
+        shm_barrier((void*)&bar_mem->all_comms, local_size, 0);
+        LOG_DEBUG("Barrier after fetching all needed remote data");
 
-    if (pmi->pmrt_barrier() != ATL_STATUS_SUCCESS) {
-        LOG_ERROR("barrier failed");
-        ret = ATL_STATUS_FAILURE;
-        goto err_ep_names;
-    }
+        // Now build ep_names_table from shared memory for the given provider
+        ep_names_table = (char*)calloc(1, ep_names_table_len);
+        if (!ep_names_table) {
+            LOG_ERROR("can't allocate epnames_table");
+            return ATL_STATUS_FAILURE;
+        }
 
-    next_ep_name = ep_names_table;
-    /* retrieve all OFI EP names in order */
-    for (i = 0; i < coord.global_count; i++) {
-        if (prov->is_shm) {
-            if (coord.global2local_map[i] == -1) {
+        std::vector<char> ret_ep_name(addr_len, '\0');
+
+        for (int i = 0; i < coord.global_count; i++) {
+            if (prov->is_shm && coord.global2local_map[i] == -1) {
+                // Skip ranks not on this node for SHM provider
                 continue;
             }
+            for (size_t j = 0; j < named_ep_count; j++) {
+                int global_ep_idx = (int)j;
+                char* addr_src = shm_base + global_addr_offset +
+                                 (i * total_named_eps + global_ep_idx) * addr_len;
+                ret_ep_name.assign(addr_src, addr_src + addr_len);
+
+                if (prov->is_shm) {
+                    ret_ep_name.resize(strnlen(ret_ep_name.data(), FI_NAME_MAX) + 1);
+                }
+
+                std::memcpy(ep_names_table + addr_idx * addr_len, ret_ep_name.data(), addr_len);
+                addr_idx++;
+            }
+        }
+    }
+    else {
+        int i;
+        size_t j;
+
+        /* allocate OFI EP names table that will contain all published names */
+        ep_names_table_len = addr_len * named_ep_count * proc_count;
+        if (ep_names_table_len == 0) {
+            LOG_ERROR("ep_names_table_len == 0, addr_len ",
+                      prov->addr_len,
+                      ", named_ep_count ",
+                      named_ep_count,
+                      ", proc_count ",
+                      proc_count);
+            return ATL_STATUS_FAILURE;
         }
 
-        for (j = 0; j < named_ep_count; j++) {
-            /* shm provider address length is variable and hence resize to maximum size */
-            if (prov->is_shm) {
-                ret_ep_name.resize(FI_NAME_MAX, '\0');
-            }
-            ret = pmi->pmrt_kvs_get(
-                (char*)ATL_OFI_FI_ADDR_PM_KEY,
-                i * ATL_OFI_PMI_PROC_MULTIPLIER + prov_idx * ATL_OFI_PMI_PROV_MULTIPLIER + j,
-                (void*)ret_ep_name.data(),
-                ret_ep_name.size());
-            /* shm provider address is a string and hence resize it to the actual string length including terminating null */
-            if (prov->is_shm) {
-                ret_ep_name.resize(strnlen(ret_ep_name.data(), FI_NAME_MAX) + 1);
-            }
-            auto it = std::find(ep_names.begin(), ep_names.end(), ret_ep_name);
-            if (it == ep_names.end()) {
-                ep_names.push_back(ret_ep_name);
-            }
-            memcpy(next_ep_name, ret_ep_name.data(), ret_ep_name.size());
-            if (ret) {
-                LOG_ERROR("kvs_get error: ret ",
-                          ret,
-                          ", proc_idx ",
-                          i,
-                          ", ep_idx ",
-                          j,
-                          ", addr_idx ",
-                          addr_idx);
+        ep_names_table = (char*)calloc(1, ep_names_table_len);
+        if (!ep_names_table) {
+            LOG_ERROR("can't allocate epnames_table");
+            return ATL_STATUS_FAILURE;
+        }
+
+        /* variable initialization must happen before the first *goto* statement */
+        std::vector<char> ret_ep_name(addr_len, '\0');
+
+        if (ccl::global_data::env().kvs_init_mode != ccl::kvs_mode::pmix_ofi) {
+            if (pmi->pmrt_barrier() != ATL_STATUS_SUCCESS) {
+                LOG_ERROR("PMI barrier failed");
+                ret = ATL_STATUS_FAILURE;
                 goto err_ep_names;
             }
+        }
 
-            addr_idx++;
-            next_ep_name += ret_ep_name.size();
+        next_ep_name = ep_names_table;
+        // Retrieve all OFI EP names in order
+        for (i = 0; i < coord.global_count; i++) {
+            if (prov->is_shm) {
+                if (coord.global2local_map[i] == -1) {
+                    continue;
+                }
+            }
+
+            for (j = 0; j < named_ep_count; j++) {
+                if (prov->is_shm) {
+                    ret_ep_name.resize(FI_NAME_MAX, '\0');
+                }
+
+                int key =
+                    i * ATL_OFI_PMI_PROC_MULTIPLIER + prov_idx * ATL_OFI_PMI_PROV_MULTIPLIER + j;
+                if (ccl::global_data::env().kvs_init_mode == ccl::kvs_mode::pmix_ofi) {
+                    // PMIx-specific logic for getting addresses
+                    std::string key_str = std::string(ATL_OFI_FI_ADDR_PM_KEY) + std::to_string(key);
+                    pmix_value_t* ret_value = nullptr;
+                    ccl_pmix::get(ccl::global_proc.nspace, i, key_str, &ret_value);
+
+                    ret_ep_name.assign(ret_value->data.bo.bytes,
+                                       ret_value->data.bo.bytes + ret_value->data.bo.size);
+                    PMIX_VALUE_RELEASE(ret_value);
+
+                    if (prov->is_shm) {
+                        size_t original_size = ret_ep_name.size();
+                        size_t resized_size = strnlen(ret_ep_name.data(), FI_NAME_MAX) + 1;
+
+                        if (resized_size < original_size) {
+                            LOG_WARN(
+                                "Endpoint name truncated from ",
+                                original_size,
+                                " to ",
+                                resized_size,
+                                " bytes due to FI_NAME_MAX limit. "
+                                "This might cause collisions if names differ only in the truncated portion.");
+                        }
+                        ret_ep_name.resize(strnlen(ret_ep_name.data(), FI_NAME_MAX) + 1);
+                    }
+                }
+                else {
+                    ret = pmi->pmrt_kvs_get((char*)ATL_OFI_FI_ADDR_PM_KEY,
+                                            key,
+                                            (void*)ret_ep_name.data(),
+                                            ret_ep_name.size());
+
+                    if (prov->is_shm) {
+                        size_t original_size = ret_ep_name.size();
+                        size_t resized_size = strnlen(ret_ep_name.data(), FI_NAME_MAX) + 1;
+
+                        if (resized_size < original_size) {
+                            LOG_WARN(
+                                "Endpoint name truncated from ",
+                                original_size,
+                                " to ",
+                                resized_size,
+                                " bytes due to FI_NAME_MAX limit. "
+                                "This might cause collisions if names differ only in the truncated portion.");
+                        }
+                        ret_ep_name.resize(strnlen(ret_ep_name.data(), FI_NAME_MAX) + 1);
+                    }
+
+                    if (ret) {
+                        LOG_ERROR("pmrt_kvs_get failed: ret: ", ret);
+                        goto err_ep_names;
+                    }
+                }
+
+                auto it = std::find(ep_names.begin(), ep_names.end(), ret_ep_name);
+                if (it == ep_names.end()) {
+                    ep_names.push_back(ret_ep_name);
+                }
+                memcpy(next_ep_name, ret_ep_name.data(), ret_ep_name.size());
+                if (ret) {
+                    LOG_ERROR("kvs_get error: ret ",
+                              ret,
+                              ", proc_idx ",
+                              i,
+                              ", ep_idx ",
+                              j,
+                              ", addr_idx ",
+                              addr_idx);
+                    goto err_ep_names;
+                }
+
+                addr_idx++;
+                next_ep_name += ret_ep_name.size();
+            }
         }
     }
 
-    LOG_DEBUG(
-        "kvs_get: ep_count ", named_ep_count, ", proc_count ", proc_count, ", got ", addr_idx);
+    LOG_DEBUG("Get: ep_count ", named_ep_count, ", proc_count ", proc_count, ", got ", addr_idx);
 
-    if (addr_idx != named_ep_count * proc_count) {
-        LOG_ERROR("unexpected kvs_get results: expected ",
-                  named_ep_count * proc_count,
-                  ", got ",
-                  addr_idx);
-
+    if (addr_idx != static_cast<size_t>(named_ep_count * proc_count)) {
+        LOG_ERROR(
+            "unexpected get results: expected ", named_ep_count * proc_count, ", got ", addr_idx);
         ret = ATL_STATUS_FAILURE;
         goto err_addr_table;
     }
@@ -348,7 +519,6 @@ atl_status_t atl_ofi_prov_update_addr_table(atl_ofi_ctx_t& ctx,
         free(prov->addr_table);
 
     prov->addr_table = (fi_addr_t*)calloc(1, ctx.ep_count * proc_count * sizeof(fi_addr_t));
-
     if (!prov->addr_table)
         goto err_ep_names;
 
@@ -381,27 +551,24 @@ atl_status_t atl_ofi_prov_update_addr_table(atl_ofi_ctx_t& ctx,
             goto err_addr_table;
         }
 
-        fi_addr_t* table;
-        table = (fi_addr_t*)calloc(1, proc_count * sizeof(fi_addr_t));
+        fi_addr_t* table = (fi_addr_t*)calloc(1, proc_count * sizeof(fi_addr_t));
         if (table == nullptr) {
             LOG_ERROR("memory allocaion failed");
             ret = ATL_STATUS_FAILURE;
             goto err_addr_table;
         }
-        memcpy(table, prov->addr_table, proc_count * sizeof(fi_addr_t));
 
-        for (i = 0; i < proc_count; i++) {
-            for (j = 0; j < ctx.ep_count; j++) {
+        memcpy(table, prov->addr_table, proc_count * sizeof(fi_addr_t));
+        for (int i = 0; i < proc_count; i++) {
+            for (size_t j = 0; j < ctx.ep_count; j++) {
                 prov->addr_table[i * ctx.ep_count + j] = fi_rx_addr(table[i], j, prov->rx_ctx_bits);
             }
         }
         free(table);
     }
 
-    /* normal end of execution */
     free(ep_names_table);
     return ret;
-
     /* abnormal end of execution */
 err_addr_table:
     free(prov->addr_table);
@@ -475,20 +642,117 @@ atl_status_t atl_ofi_prov_eps_connect(atl_ofi_ctx_t& ctx,
         }
     }
 
-    for (ep_idx = 0; ep_idx < named_ep_count; ep_idx++) {
-        atl_ofi_prov_ep_t* ep = &(prov->eps[ep_idx]);
-        ret = pmi->pmrt_kvs_put((char*)ATL_OFI_FI_ADDR_PM_KEY,
-                                coord.global_idx * ATL_OFI_PMI_PROC_MULTIPLIER +
-                                    prov_idx * ATL_OFI_PMI_PROV_MULTIPLIER + ep_idx,
-                                ep->name.addr,
-                                ep->name.len);
-        if (ret) {
-            LOG_ERROR("pmrt_kvs_put: ret: ", ret);
-            return ATL_STATUS_FAILURE;
-        }
-    }
+    if (ccl::global_data::env().kvs_init_mode == ccl::kvs_mode::pmix_ofi_shm) {
+        int global_rank = coord.global_idx;
+        int local_rank = coord.local_idx;
+        int local_size = coord.local_count;
+        int global_size = pmi->get_size();
+        bool is_node_root = (local_rank == 0);
 
-    ret = atl_ofi_prov_update_addr_table(ctx, coord, prov_idx, pmi, ep_names);
+        size_t total_named_eps = named_ep_count;
+        size_t addr_len = prov->addr_len;
+
+        // Shared memory layout:
+        // [COUNTER_OFFSET] + [local_size * total_named_eps * addr_len for local addresses]
+        // + [global_size * total_named_eps * addr_len for global addresses (if needed)]
+        size_t local_addrs_size = local_size * total_named_eps * addr_len;
+        size_t global_addrs_size = global_size * total_named_eps * addr_len;
+        size_t length = COUNTER_OFFSET + local_addrs_size + global_addrs_size;
+
+        void* shared_memory = nullptr;
+        ATL_CHECK_STATUS(setup_shared_memory(get_shm_filename("/dev/shm/EPS-shm-file"),
+                                             local_size,
+                                             is_node_root,
+                                             length,
+                                             &shared_memory,
+                                             0),
+                         "setup_shared_memory failed");
+
+        char* shm_base = static_cast<char*>(shared_memory);
+        size_t local_addr_offset = COUNTER_OFFSET;
+        size_t global_addr_offset = COUNTER_OFFSET + local_addrs_size;
+
+        // Write local endpoint addresses into shared memory
+        for (size_t ep_idx = 0; ep_idx < named_ep_count; ep_idx++) {
+            char* local_dest =
+                shm_base + local_addr_offset + (local_rank * total_named_eps + ep_idx) * addr_len;
+            std::memcpy(local_dest, prov->eps[ep_idx].name.addr, addr_len);
+        }
+
+        auto bar_mem = static_cast<barrier_mem_t*>(shared_memory);
+        shm_barrier((void*)&bar_mem->all_comms, local_size, 0);
+        LOG_DEBUG("Barrier after writing local addresses");
+
+        // PMIx Put by Each Rank Individually
+        // Each rank publishes its local endpoints directly with a rank-specific key:
+        {
+            std::string key_str = "RANK_EP_ADDRS_" + std::to_string(global_rank);
+            pmix_value_t value;
+            PMIX_VALUE_CONSTRUCT(&value);
+            char* rank_src =
+                shm_base + local_addr_offset + (local_rank * total_named_eps * addr_len);
+            pmix_byte_object_t bo;
+            bo.bytes = rank_src;
+            bo.size = total_named_eps * addr_len;
+            ccl_pmix::value_load(value, &bo, PMIX_BYTE_OBJECT);
+            LOG_DEBUG("PMIx PUT key: ", key_str);
+            ccl_pmix::put(key_str, value);
+        }
+
+        ccl_pmix::commit();
+        ccl_pmix::fence(ccl::global_proc.nspace, pmi->get_rank(), pmi->get_size());
+
+        // After fence, all ranks have published their endpoints.
+        // The next step (in the update_addr_table) will be to fetch needed addresses.
+        ret = atl_ofi_prov_update_addr_table(ctx,
+                                             coord,
+                                             prov_idx,
+                                             pmi,
+                                             ep_names,
+                                             shared_memory,
+                                             length,
+                                             total_named_eps,
+                                             local_addr_offset,
+                                             global_addr_offset);
+    }
+    else {
+        for (ep_idx = 0; ep_idx < named_ep_count; ep_idx++) {
+            atl_ofi_prov_ep_t* ep = &(prov->eps[ep_idx]);
+            int key = coord.global_idx * ATL_OFI_PMI_PROC_MULTIPLIER +
+                      prov_idx * ATL_OFI_PMI_PROV_MULTIPLIER + ep_idx;
+            if (ccl::global_data::env().kvs_init_mode == ccl::kvs_mode::pmix_ofi) {
+                // PMIx-specific logic for putting addresses
+                pmix_value_t value;
+                PMIX_VALUE_CONSTRUCT(&value);
+
+                pmix_byte_object_t bo;
+                bo.bytes = static_cast<char*>(ep->name.addr);
+                bo.size = ep->name.len;
+                ccl_pmix::value_load(value, &bo, PMIX_BYTE_OBJECT);
+
+                std::string key_str = std::string(ATL_OFI_FI_ADDR_PM_KEY) + std::to_string(key);
+                LOG_DEBUG("PMIx PUT key: ", key);
+                ccl_pmix::put(key_str, value);
+            }
+            else {
+                ret = pmi->pmrt_kvs_put((char*)ATL_OFI_FI_ADDR_PM_KEY,
+                                        coord.global_idx * ATL_OFI_PMI_PROC_MULTIPLIER +
+                                            prov_idx * ATL_OFI_PMI_PROV_MULTIPLIER + ep_idx,
+                                        ep->name.addr,
+                                        ep->name.len);
+                if (ret) {
+                    LOG_ERROR("pmrt_kvs_put: ret: ", ret);
+                    return ATL_STATUS_FAILURE;
+                }
+            }
+        }
+
+        if (ccl::global_data::env().kvs_init_mode == ccl::kvs_mode::pmix_ofi) {
+            ccl_pmix::commit();
+            ccl_pmix::fence(ccl::global_proc.nspace, pmi->get_rank(), pmi->get_size());
+        }
+        ret = atl_ofi_prov_update_addr_table(ctx, coord, prov_idx, pmi, ep_names);
+    }
 
     return ATL_OFI_RET(ret);
 }
@@ -795,6 +1059,7 @@ atl_status_t atl_ofi_set_env(const atl_attr_t& attr) {
     setenv("PSM3_RDMA", "2", 0);
     setenv("PSM3_MR_CACHE_MODE", "0", 0); //TODO temporary
     setenv("PSM3_MULTI_EP", "1", 0);
+    setenv("PSM3_HAL", "verbs", 0);
     if (attr.in.mnic_type == ATL_MNIC_NONE)
         setenv("PSM3_NIC", "any", 0);
 
@@ -816,6 +1081,7 @@ atl_status_t atl_ofi_set_env(const atl_attr_t& attr) {
 
 #ifdef CCL_ENABLE_SYCL
     setenv("FI_SHM_DISABLE_CMA", "1", 0);
+    setenv("FI_HMEM", "ze", 0);
 #endif // CCL_ENABLE_SYCL
 
     setenv("FI_MLX_MULTI_EP", "1", 0);
@@ -1396,4 +1662,188 @@ void atl_ofi_init_req(atl_req_t& req, atl_ofi_prov_ep_t* prov_ep, struct fid_ep*
     ofi_req->fi_ep = fi_ep;
     ofi_req->comp_state = ATL_OFI_COMP_POSTED;
     req.is_completed = 0;
+}
+
+std::string get_shm_filename(std::string filename) {
+    uid_t uid = getuid();
+    std::stringstream ss;
+    ss << filename << "-" << getenv("PALS_APID") << "-" << std::to_string(uid);
+    return ss.str();
+}
+
+void shm_barrier(void* mem, int local_size, int comm_id) {
+    // Interpret mem as ShmBarrierAllComms
+    ShmBarrierAllComms* all_comms = reinterpret_cast<ShmBarrierAllComms*>(mem);
+
+    // Check comm_id is in range
+    if (comm_id < 0 || comm_id >= MAX_COMM) {
+        std::cerr << "Error: comm_id out of range " << comm_id << std::endl;
+        exit(-1);
+    }
+
+    // Each communicator uses its own ShmBarrierData slot
+    ShmBarrierData* d = &all_comms->comm_barriers[comm_id];
+
+    std::atomic<int>& barrier_counter = d->barrier_counter;
+    std::atomic<int>& call_count = d->call_count;
+
+    // Light sleep to avoid tight spinning
+    usleep(1000);
+
+    // Current round
+    int current_round = call_count.load(std::memory_order_acquire);
+
+    // Increment barrier_counter
+    int old_val = barrier_counter.fetch_add(1, std::memory_order_acq_rel);
+
+    // If we are the last process to arrive in this round
+    if (old_val + 1 == local_size) {
+        // Reset for next round
+        barrier_counter.store(0, std::memory_order_release);
+        // Indicate next round
+        call_count.fetch_add(1, std::memory_order_release);
+    }
+    else {
+        // Wait until call_count increments
+        while (call_count.load(std::memory_order_acquire) == current_round) {
+            usleep(1000); // short sleep to reduce CPU usage
+        }
+    }
+}
+
+atl_status_t setup_shared_memory(std::string shm_name,
+                                 int local_size,
+                                 bool is_node_root,
+                                 size_t length,
+                                 void** out_shared_memory,
+                                 int my_comm_id) {
+    LOG_DEBUG("Shared memory filename: " + shm_name);
+    int fd = -1;
+
+    if (is_node_root) {
+        // Root process creates the shared memory file
+        fd = open(shm_name.c_str(), O_CREAT | O_RDWR, 0666);
+        if (fd < 0) {
+            LOG_ERROR("Failed to open shared memory file: ", strerror(errno));
+            return ATL_STATUS_FAILURE;
+        }
+        if (ftruncate(fd, length) != 0) {
+            LOG_ERROR("Failed to set size of shared memory file: ", strerror(errno));
+            close(fd);
+            return ATL_STATUS_FAILURE;
+        }
+    }
+    else {
+        // Non-root processes open the existing shared memory file with retries
+        struct stat file_stat;
+        int retry_count = 0;
+        constexpr int max_retries = 20;
+        constexpr int backoff_base = 10000;
+
+        while (retry_count < max_retries) {
+            if (stat(shm_name.c_str(), &file_stat) == 0) {
+                fd = open(shm_name.c_str(), O_RDWR, 0666);
+                if (fd >= 0)
+                    break;
+            }
+            usleep(backoff_base * (1 << retry_count));
+            retry_count++;
+        }
+        if (fd < 0) {
+            LOG_ERROR("Non-root rank failed to open shared memory file: ", strerror(errno));
+            return ATL_STATUS_FAILURE;
+        }
+    }
+
+    // Map shared memory
+    void* shared_memory = mmap(nullptr, length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (shared_memory == MAP_FAILED) {
+        LOG_ERROR("Failed to map shared memory: ", strerror(errno));
+        close(fd);
+        return ATL_STATUS_FAILURE;
+    }
+    close(fd);
+
+    auto* bar_mem = static_cast<barrier_mem_t*>(shared_memory);
+    if (is_node_root) {
+        bar_mem->all_comms.comm_barriers[my_comm_id].barrier_counter.store(
+            0, std::memory_order_relaxed);
+        bar_mem->all_comms.comm_barriers[my_comm_id].call_count.store(0, std::memory_order_release);
+        LOG_DEBUG("Barrier counter initialized by node root");
+    }
+
+    shm_barrier((void*)&bar_mem->all_comms, local_size, my_comm_id);
+
+    if (is_node_root) {
+        unlink(shm_name.c_str());
+    }
+    shm_barrier((void*)&bar_mem->all_comms, local_size, my_comm_id);
+
+    *out_shared_memory = shared_memory;
+    return ATL_STATUS_SUCCESS;
+}
+
+atl_status_t fetch_and_populate_remote_data(void* shared_memory,
+                                            size_t local_size,
+                                            size_t global_size,
+                                            int global_rank,
+                                            int local_rank,
+                                            size_t total_named_eps,
+                                            size_t addr_len,
+                                            size_t local_addr_offset,
+                                            size_t global_addr_offset,
+                                            char* shm_base,
+                                            size_t length) {
+    // Calculate the number of nodes and node_id
+    int number_of_nodes = global_size / local_size;
+    int node_id = global_rank / local_size;
+
+    // Fetch data for the corresponding rank on each remote node
+    for (int nid = 0; nid < number_of_nodes; nid++) {
+        if (nid == node_id) {
+            // Skip the local node
+            continue;
+        }
+
+        // Compute the global rank on the remote node corresponding to this local rank
+        int remote_rank = nid * local_size + local_rank;
+        if (remote_rank == global_rank) {
+            // Skip our own rank
+            continue;
+        }
+
+        std::string key_str = std::string("RANK_EP_ADDRS_") + std::to_string(remote_rank);
+        pmix_value_t* ret_value = nullptr;
+
+        LOG_DEBUG("PMIx GET key: " + key_str + ", remote_rank: " + std::to_string(remote_rank) +
+                  ", node_id: " + std::to_string(node_id) + ", nid: " + std::to_string(nid));
+
+        // Fetch the data for the remote rank
+        ccl_pmix::get(ccl::global_proc.nspace, remote_rank, key_str, &ret_value);
+
+        if (!ret_value || ret_value->type != PMIX_BYTE_OBJECT) {
+            LOG_ERROR("PMIx Key not found or invalid: ", key_str);
+            if (ret_value)
+                PMIX_VALUE_RELEASE(ret_value);
+            munmap(shared_memory, length);
+            return ATL_STATUS_FAILURE;
+        }
+
+        // Write fetched data into the global portion of shared memory
+        char* dest = shm_base + global_addr_offset + (remote_rank * total_named_eps * addr_len);
+        std::memcpy(dest, ret_value->data.bo.bytes, ret_value->data.bo.size);
+        PMIX_VALUE_RELEASE(ret_value);
+    }
+
+    // Populate the global portion for local node ranks, including our own
+    for (size_t local_node_rank = 0; local_node_rank < local_size; local_node_rank++) {
+        int lr_global_rank = node_id * local_size + local_node_rank;
+
+        // Copy from local portion to global portion for the local node's ranks
+        char* src = shm_base + local_addr_offset + (local_node_rank * total_named_eps * addr_len);
+        char* dest = shm_base + global_addr_offset + (lr_global_rank * total_named_eps * addr_len);
+        std::memcpy(dest, src, total_named_eps * addr_len);
+    }
+
+    return ATL_STATUS_SUCCESS;
 }

@@ -71,9 +71,11 @@ bool ofi_api_init() {
     ofi_lib_info.fn_names = ofi_fn_names;
     ofi_lib_info.path = get_ofi_lib_path();
 
-    load_library(ofi_lib_info);
-    if (!ofi_lib_info.handle)
+    int error = load_library(ofi_lib_info);
+    if (error != CCL_LOAD_LB_SUCCESS) {
+        print_error(error, ofi_lib_info);
         ret = false;
+    }
 
     return ret;
 }

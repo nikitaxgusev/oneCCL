@@ -226,6 +226,33 @@ constexpr const char* CCL_ATL_CACHE = "CCL_ATL_CACHE";
  */
 constexpr const char* CCL_ENABLE_AUTO_CACHE = "CCL_ENABLE_AUTO_CACHE";
 /**  @} */
+
+#if defined(CCL_ENABLE_MPI) && defined(CCL_ENABLE_OMP)
+/**
+ * @addtogroup OneCCLvars
+ * @{
+ */
+/**
+ * @brief Set this environment variable to use openmp threads for synchronous collectives with direct algorithms on host buffers.
+ * @details
+ * Syntax \n
+ * CCL_ENABLE_OMP_ALLREDUCE="<value>"\n
+ * \n
+ * Arguments\n
+ * "<value>"	Description\n
+ * 	- 0	Does not use openmp threads for allreduce.\n
+ * 	- 1	Use openmp threads for allreduce (default).\n
+ * \n
+ *
+ *
+ * By-default: "1"
+ */
+constexpr const char* CCL_ENABLE_OMP_ALLREDUCE = "CCL_ENABLE_OMP_ALLREDUCE";
+/**  @} */
+
+constexpr const char* CCL_OMP_ALLREDUCE_NUM_THREADS = "CCL_OMP_ALLREDUCE_NUM_THREADS";
+#endif // CCL_ENABLE_MPI && CCL_ENABLE_OMP
+
 constexpr const char* CCL_MNIC = "CCL_MNIC";
 constexpr const char* CCL_MNIC_NAME = "CCL_MNIC_NAME";
 constexpr const char* CCL_MNIC_COUNT = "CCL_MNIC_COUNT";
@@ -579,6 +606,8 @@ constexpr const char* CCL_BUFFER_CACHE = "CCL_BUFFER_CACHE";
 constexpr const char* CCL_STRICT_ORDER = "CCL_STRICT_ORDER";
 constexpr const char* CCL_STAGING_BUFFER = "CCL_STAGING_BUFFER";
 constexpr const char* CCL_OP_SYNC = "CCL_OP_SYNC";
+constexpr const char* CCL_OFI_ENABLE_HOSTNAME_SHARING = "CCL_OFI_ENABLE_HOSTNAME_SHARING";
+constexpr const char* CCL_OFI_INIT_ENABLE_HOSTNAME_SHARING = "CCL_OFI_INIT_ENABLE_HOSTNAME_SHARING";
 
 constexpr const char* CCL_CHUNK_COUNT = "CCL_CHUNK_COUNT";
 constexpr const char* CCL_MIN_CHUNK_SIZE = "CCL_MIN_CHUNK_SIZE";
@@ -1000,6 +1029,8 @@ constexpr const char* CCL_TOPO_COLOR = "CCL_TOPO_COLOR";
 constexpr const char* CCL_TOPO_P2P_ACCESS = "CCL_TOPO_P2P_ACCESS";
 constexpr const char* CCL_TOPO_FABRIC_VERTEX_CONNECTION_CHECK = "CCL_TOPO_FABRIC_VERTEX_CONNECTION_CHECK";
 constexpr const char* CCL_TOPO_WA_FABRIC_VERTEX_CONNECTION_CHECK = "CCL_TOPO_WA_FABRIC_VERTEX_CONNECTION_CHECK";
+constexpr const char* CCL_USE_MPI_BCAST_WA = "CCL_USE_MPI_BCAST_WA";
+constexpr const char* CCL_USE_ROOT_PRINT_WA = "CCL_USE_ROOT_PRINT_WA";
 
 #ifdef CCL_ENABLE_MPI
 constexpr const char* CCL_MPI_LIBRARY_PATH = "CCL_MPI_LIBRARY_PATH";
@@ -1135,11 +1166,32 @@ constexpr const char* CCL_ZE_LIBRARY_PATH = "CCL_ZE_LIBRARY_PATH";
 constexpr const char* CCL_ZE_ENABLE = "CCL_ZE_ENABLE";
 constexpr const char* CCL_ZE_FINI_WA = "CCL_ZE_FINI_WA";
 constexpr const char* CCL_ZE_MULTI_WORKERS = "CCL_ZE_MULTI_WORKERS";
+
 /**
  * @addtogroup OneCCLvars
  * @{
  */
-
+/**
+ * @brief Set this environment variable to select read or write based device-to-device data copy for the alltoall collective using device (GPU) buffers.
+ *
+ * @details
+ *
+ * Syntax
+ * CCL_SYCL_ALLTOALL_PROTOCOL="<value>"
+ *
+ * Arguments
+ *
+ * "<value>"	Description
+ * 	- read	Uses read based copy to transfer data across GPUs for the alltoall collective.
+ * 	- write	Uses write based copy to transfer data across GPUs for the alltoall collective (default).
+ *
+ * Description
+ *
+ * Set this environment variable to select read or write based device-to-device data copy for the alltoall collective using device (GPU) buffers.
+ *
+ * By-default: "write"
+ */
+constexpr const char* CCL_SYCL_ALLTOALL_PROTOCOL = "CCL_SYCL_ALLTOALL_PROTOCOL";
 /**
  * @brief Set the directory path for DRM render devices.
  *
@@ -1166,6 +1218,7 @@ constexpr const char* CCL_DRMFD_DEV_RENDER_SUFFIX = "CCL_DRMFD_DEV_RENDER_SUFFIX
 #ifdef CCL_ENABLE_PMIX
 constexpr const char* CCL_PMIX_LIBRARY_PATH = "CCL_PMIX_LIBRARY_PATH";
 #endif // CCL_ENABLE_PMIX
+constexpr const char* CCL_OFI_ENABLE_PMIX_SUPPORT = "CCL_OFI_ENABLE_PMIX_SUPPORT";
 
 #ifdef CCL_ENABLE_ITT
 constexpr const char* CCL_ITT_LEVEL = "CCL_ITT_LEVEL";

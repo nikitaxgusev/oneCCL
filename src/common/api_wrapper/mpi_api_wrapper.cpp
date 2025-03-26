@@ -39,9 +39,11 @@ bool mpi_api_init() {
     }
     LOG_DEBUG("MPI lib path: ", mpi_lib_info.path);
 
-    load_library(mpi_lib_info);
-    if (!mpi_lib_info.handle)
+    int error = load_library(mpi_lib_info);
+    if (error != CCL_LOAD_LB_SUCCESS) {
+        print_error(error, mpi_lib_info);
         ret = false;
+    }
 
     return ret;
 }
@@ -49,6 +51,10 @@ bool mpi_api_init() {
 void mpi_api_fini() {
     LOG_DEBUG("close MPI lib: handle: ", mpi_lib_info.handle);
     close_library(mpi_lib_info);
+}
+
+const CCL_API mpi_lib_ops_t &get_mpi_lib_ops() {
+    return mpi_lib_ops;
 }
 
 } //namespace ccl

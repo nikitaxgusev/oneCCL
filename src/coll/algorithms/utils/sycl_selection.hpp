@@ -25,17 +25,42 @@
 #include "common/global/global.hpp"
 #include "coll/selection/selection.hpp"
 
-ccl_selector_param create_ccl_selector_param(ccl_coll_type ctype,
-                                             size_t count,
-                                             ccl::datatype dtype,
-                                             ccl_comm* comm,
-                                             ccl_stream* stream,
-                                             void* buf,
-                                             ccl::reduction reduction = ccl::reduction::custom,
-                                             bool is_vector_buf = false,
-                                             bool is_sycl_buf = false,
-                                             int peer_rank = CCL_INVALID_PEER_RANK_IDX,
-                                             ccl_coll_algo hint_algo = {},
-                                             bool is_scaleout = false);
-
+// dispatching between SYCL path and Scheduler path
 bool can_use_sycl_kernels(const ccl_selector_param& param);
+
+// collective tuning parameters
+enum class allreduce_scaleout_algo { direct, rabenseifner, ring };
+enum class reduce_scatter_scaleout_algo { direct, ring };
+enum class allgatherv_scaleout_algo { direct, ring };
+
+struct sycl_allreduce_tune_attr {
+    allreduce_scaleout_algo algo{ allreduce_scaleout_algo::direct };
+    size_t pipeline_chunk_size{ 2 * 1024 * 1024 };
+};
+
+struct sycl_reduce_scatter_tune_attr {
+    reduce_scatter_scaleout_algo algo{ reduce_scatter_scaleout_algo::direct };
+    size_t pipeline_chunk_size{ 2 * 1024 * 1024 };
+};
+
+struct sycl_allgatherv_tune_attr {
+    allgatherv_scaleout_algo algo{ allgatherv_scaleout_algo::direct };
+    size_t pipeline_chunk_size{ 2 * 1024 * 1024 };
+};
+
+// alleduce
+size_t allreduce_select_chunk_size(allreduce_scaleout_algo algo, size_t size, size_t comm_size);
+sycl_allreduce_tune_attr allreduce_select_tune_attr(size_t size,
+                                                    size_t comm_size,
+                                                    ccl_datatype ccl_dtype);
+
+// reduce-scatter
+sycl_reduce_scatter_tune_attr reduce_scatter_select_tune_attr(size_t size,
+                                                              size_t comm_size,
+                                                              ccl_datatype ccl_dtype);
+size_t reduce_scatter_select_chunk_size(reduce_scatter_scaleout_algo algo,
+                                        size_t size,
+                                        size_t comm_size);
+
+// allgatherv
+size_t allgatherv_select_chunk_size();

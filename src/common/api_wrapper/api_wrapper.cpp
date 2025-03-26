@@ -16,11 +16,15 @@
 #include "common/api_wrapper/api_wrapper.hpp"
 #if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE)
 #include "common/api_wrapper/ze_api_wrapper.hpp"
+#if defined(CCL_ENABLE_UMF)
+#include "common/api_wrapper/umf_api_wrapper.hpp"
+#endif // CCL_ENABLE_UMF
 #endif //CCL_ENABLE_SYCL && CCL_ENABLE_ZE
 #if defined(CCL_ENABLE_MPI)
 #include "common/api_wrapper/mpi_api_wrapper.hpp"
 #endif //CCL_ENABLE_MPI
 #include "common/api_wrapper/ofi_api_wrapper.hpp"
+#include "common/api_wrapper/openmp_wrapper.hpp"
 
 #include <dlfcn.h>
 
@@ -66,7 +70,30 @@ void api_wrappers_init() {
     else {
         LOG_INFO("could not initialize level-zero api");
     }
+#if defined(CCL_ENABLE_UMF)
+    if (ccl::global_data::env().backend == backend_mode::native &&
+        ccl::global_data::env().umf_enable) {
+        LOG_INFO("initializing umf api");
+        if (!umf_api_init()) {
+            CCL_THROW("could not initialize umf api");
+        }
+    }
+    else {
+        LOG_INFO("could not initialize umf api");
+    }
+#endif // CCL_ENABLE_UMF
+
 #endif //CCL_ENABLE_SYCL && CCL_ENABLE_ZE
+#if defined(CCL_ENABLE_MPI) && defined(CCL_ENABLE_OMP)
+    if (!openmp_api_init()) {
+        ccl::openmp_lib_ops.allreduce = nullptr;
+        ccl::openmp_lib_ops.thread_num = nullptr;
+        ccl::openmp_lib_ops.init = nullptr;
+    }
+    else {
+        ccl::openmp_lib_ops.init(ccl::global_data::env().omp_allreduce_num_threads);
+    }
+#endif // CCL_ENABLE_MPI && CCL_ENABLE_OMP
 }
 
 void api_wrappers_fini() {
@@ -76,34 +103,60 @@ void api_wrappers_fini() {
 #endif //CCL_ENABLE_MPI
 #if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE)
     ze_api_fini();
+#if defined(CCL_ENABLE_UMF)
+    umf_api_fini();
+#endif // CCL_ENABLE_UMF
 #endif //CCL_ENABLE_SYCL && CCL_ENABLE_ZE
+#if defined(CCL_ENABLE_MPI) && defined(CCL_ENABLE_OMP)
+    openmp_api_fini();
+#endif // CCL_ENABLE_MPI && CCL_ENABLE_OMP
 }
 
-void load_library(lib_info_t& info) {
+int load_library(lib_info_t& info) {
     // Check if the path to the library passed in info is correct
     // - if it contains invalid characters log an error and leave the handle empty.
     bool is_invalid_path =
         ((info.path.find("..") != std::string::npos) ||
          (info.path.find("./") != std::string::npos) || (info.path.find("%") != std::string::npos));
     if (is_invalid_path) {
-        LOG_WARN("library path is not valid: ",
-                 info.path.c_str(),
-                 ", error: path contains invalid characters");
-        return;
+        return CCL_LOAD_LB_PATH_ERROR;
     }
 
     info.handle = dlopen(info.path.c_str(), RTLD_LAZY | RTLD_GLOBAL);
     if (!info.handle) {
-        LOG_WARN("could not open the library: ", info.path.c_str(), ", error: ", dlerror());
-        return;
+        return CCL_LOAD_LB_DLOPEN_ERROR;
     }
 
     void** ops = (void**)((void*)info.ops);
     auto fn_names = info.fn_names;
     for (size_t i = 0; i < fn_names.size(); ++i) {
-        ops[i] = dlsym(info.handle, fn_names[i].c_str());
+        if (info.direct) {
+            ops[i] = dlsym(info.handle, fn_names[i].c_str());
+        }
+        else {
+            auto indirect_symbol = reinterpret_cast<ccl::indirect_symbol_fn_t>(
+                dlsym(info.handle, fn_names[i].c_str()));
+            if (!indirect_symbol) {
+                // Log the dlsym error using dlerror before calling the function
+                LOG_ERROR("dlsym failed for symbol: ", fn_names[i], ", error: ", dlerror());
+                return CCL_LOAD_LB_DLOPEN_ERROR;
+            }
+            ops[i] = indirect_symbol();
+        }
         CCL_THROW_IF_NOT(ops[i], "dlsym is failed on: ", fn_names[i], ", error: ", dlerror());
         LOG_TRACE("dlsym loaded of ", fn_names.size(), " - ", i + 1, ": ", fn_names[i]);
+    }
+    return CCL_LOAD_LB_SUCCESS;
+}
+
+void print_error(int error, lib_info_t& info) {
+    if (error == CCL_LOAD_LB_PATH_ERROR) {
+        LOG_WARN("library path is not valid: ",
+                 info.path.c_str(),
+                 " - path contains invalid characters");
+    }
+    else if (error == CCL_LOAD_LB_DLOPEN_ERROR) {
+        LOG_WARN("could not open the library: ", info.path.c_str(), " - ", dlerror());
     }
 }
 

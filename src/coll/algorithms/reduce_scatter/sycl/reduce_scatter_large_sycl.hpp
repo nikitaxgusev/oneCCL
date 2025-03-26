@@ -42,122 +42,6 @@
 #define COPY_BUFFER_COUNT COPY_KERNEL_NUM
 #define COPY_LAST_KERNEL  THIRD_KERNEL
 
-#define RUN_FIRST_KERNEL \
-    if (sw_pipeline_kernel_state[ii] & FIRST_KERNEL) { \
-        for (int inner_iter = 0; inner_iter < innerloop_iter_count; inner_iter++) { \
-            int index = idx + inner_iter * HW_THREAD_COUNT; \
-            if ((uint32_t)index >= total_threads_needed) \
-                break; \
-            switch (temp_world) { \
-                case 2: \
-                    local_copy<2, data_type>((int *)even_ranks, \
-                                             index, \
-                                             send_buf, \
-                                             recv_size, \
-                                             threads_already_processed[ii], \
-                                             (void **)temp_buffer, \
-                                             temp_rank, \
-                                             outer_iter, \
-                                             size_per_buffer_kernel, \
-                                             ii, \
-                                             threads_needed_per_chunk); \
-                    break; \
-                case 4: \
-                    local_copy<4, data_type>((int *)even_ranks, \
-                                             index, \
-                                             send_buf, \
-                                             recv_size, \
-                                             threads_already_processed[ii], \
-                                             (void **)temp_buffer, \
-                                             temp_rank, \
-                                             outer_iter, \
-                                             size_per_buffer_kernel, \
-                                             ii, \
-                                             threads_needed_per_chunk); \
-                    break; \
-                case 6: \
-                    local_copy<6, data_type>((int *)even_ranks, \
-                                             index, \
-                                             send_buf, \
-                                             recv_size, \
-                                             threads_already_processed[ii], \
-                                             (void **)temp_buffer, \
-                                             temp_rank, \
-                                             outer_iter, \
-                                             size_per_buffer_kernel, \
-                                             ii, \
-                                             threads_needed_per_chunk); \
-                    break; \
-                case 8: \
-                    local_copy<8, data_type>((int *)even_ranks, \
-                                             index, \
-                                             send_buf, \
-                                             recv_size, \
-                                             threads_already_processed[ii], \
-                                             (void **)temp_buffer, \
-                                             temp_rank, \
-                                             outer_iter, \
-                                             size_per_buffer_kernel, \
-                                             ii, \
-                                             threads_needed_per_chunk); \
-                    break; \
-                case 10: \
-                    local_copy<10, data_type>((int *)even_ranks, \
-                                              index, \
-                                              send_buf, \
-                                              recv_size, \
-                                              threads_already_processed[ii], \
-                                              (void **)temp_buffer, \
-                                              temp_rank, \
-                                              outer_iter, \
-                                              size_per_buffer_kernel, \
-                                              ii, \
-                                              threads_needed_per_chunk); \
-                    break; \
-                case 12: \
-                    local_copy<12, data_type>((int *)even_ranks, \
-                                              index, \
-                                              send_buf, \
-                                              recv_size, \
-                                              threads_already_processed[ii], \
-                                              (void **)temp_buffer, \
-                                              temp_rank, \
-                                              outer_iter, \
-                                              size_per_buffer_kernel, \
-                                              ii, \
-                                              threads_needed_per_chunk); \
-                    break; \
-                case 14: \
-                    local_copy<14, data_type>((int *)even_ranks, \
-                                              index, \
-                                              send_buf, \
-                                              recv_size, \
-                                              threads_already_processed[ii], \
-                                              (void **)temp_buffer, \
-                                              temp_rank, \
-                                              outer_iter, \
-                                              size_per_buffer_kernel, \
-                                              ii, \
-                                              threads_needed_per_chunk); \
-                    break; \
-                case 16: \
-                    local_copy<16, data_type>((int *)even_ranks, \
-                                              index, \
-                                              send_buf, \
-                                              recv_size, \
-                                              threads_already_processed[ii], \
-                                              (void **)temp_buffer, \
-                                              temp_rank, \
-                                              outer_iter, \
-                                              size_per_buffer_kernel, \
-                                              ii, \
-                                              threads_needed_per_chunk); \
-                    break; \
-                default: break; \
-            } \
-        } \
-    } // end of if FIRST_KERNEL
-
 #define RUN_SECOND_KERNEL \
     if (sw_pipeline_kernel_state[ii] & FIRST_KERNEL) { \
         for (int inner_iter = 0; inner_iter < innerloop_iter_count; inner_iter++) { \
@@ -218,7 +102,7 @@ void nocopy_reduce_read_write(int *even_ranks,
                               int idx,
                               void **in_buffers,
                               void *out_buffer,
-                              uint32_t recv_size,
+                              size_t recv_size,
                               int threads_already_processed,
                               void *temp_buffer[],
                               uint32_t temp_rank,
@@ -229,25 +113,38 @@ void nocopy_reduce_read_write(int *even_ranks,
     using namespace __ESIMD_NS;
     using namespace __ESIMD_ENS;
 
-    int chunk_size = threads_needed_per_chunk * SIMD_COMPUTE * UNROLL_SIZE;
-    int abs_offset_in_chunk = idx + threads_already_processed;
-    int read_offset = abs_offset_in_chunk * SIMD_COMPUTE * UNROLL_SIZE;
-
+    size_t chunk_size = threads_needed_per_chunk * SIMD_COMPUTE * UNROLL_SIZE;
+    size_t abs_offset_in_chunk = idx + threads_already_processed;
+    size_t read_offset = abs_offset_in_chunk * SIMD_COMPUTE * UNROLL_SIZE;
+    if (read_offset >= recv_size)
+        return;
     data_type *mdfi_ptr = (data_type *)in_buffers[temp_rank ^ 1];
     simd<data_type, SIMD_COMPUTE * UNROLL_SIZE * TEMP_WORLD / 2> mdfi_buffer;
     data_type *local_ptr = (data_type *)in_buffers[temp_rank];
     simd<data_type, SIMD_COMPUTE * UNROLL_SIZE * TEMP_WORLD / 2> local_buffer;
-    //#pragma unroll
-    for (uint32_t r = 0; r < TEMP_WORLD / 2; r++) {
-        int rr = even_ranks[r]; // even rank copies odd chunks
+    if (read_offset + UNROLL_SIZE * SIMD_COMPUTE <= recv_size) {
+        for (uint32_t r = 0; r < TEMP_WORLD / 2; r++) {
+            int rr = even_ranks[r]; // even rank copies odd chunks
 #pragma unroll
-        for (uint32_t i = 0; i < UNROLL_SIZE; i++) {
-            mdfi_buffer.template select<SIMD_COMPUTE, 1>(r * SIMD_COMPUTE * UNROLL_SIZE + SIMD_COMPUTE * i) =
-                block_load<data_type, SIMD_COMPUTE>(mdfi_ptr + rr * recv_size + read_offset + i * SIMD_COMPUTE,
-                                                    properties{ alignment<align> });
-            local_buffer.template select<SIMD_COMPUTE, 1>(r * SIMD_COMPUTE * UNROLL_SIZE + SIMD_COMPUTE * i) =
-                block_load<data_type, SIMD_COMPUTE>(local_ptr + rr * recv_size + read_offset + i * SIMD_COMPUTE,
-                                                    properties{ alignment<align> });
+            for (uint32_t i = 0; i < UNROLL_SIZE; i++) {
+                mdfi_buffer.template select<SIMD_COMPUTE, 1>(r * SIMD_COMPUTE * UNROLL_SIZE + SIMD_COMPUTE * i) =
+                    block_load<data_type, SIMD_COMPUTE>(mdfi_ptr + rr * recv_size + read_offset + i * SIMD_COMPUTE,
+                                                        properties{ alignment<align> });
+                local_buffer.template select<SIMD_COMPUTE, 1>(r * SIMD_COMPUTE * UNROLL_SIZE + SIMD_COMPUTE * i) =
+                    block_load<data_type, SIMD_COMPUTE>(
+                        local_ptr + rr * recv_size + read_offset + i * SIMD_COMPUTE,
+                        properties{ alignment<align> });
+            }
+        }
+    }
+    else {
+        int count = recv_size - read_offset;
+        for (uint32_t r = 0; r < TEMP_WORLD / 2; r++) {
+            int rr = even_ranks[r]; // even rank copies odd chunks
+            for (uint32_t i = 0; i < count; i++) {
+                mdfi_buffer[r * SIMD_COMPUTE * UNROLL_SIZE + i] = mdfi_ptr[rr * recv_size + read_offset + i];
+                local_buffer[r * SIMD_COMPUTE * UNROLL_SIZE + i] = local_ptr[rr * recv_size + read_offset + i];
+            }
         }
     }
 
@@ -275,7 +172,7 @@ void nocopy_reduce_read_write(int *even_ranks,
         int rr = even_ranks[r];
         data_type *write_ptr = (data_type *)temp_buffer[rr];
         write_ptr += size_per_buffer_kernel * buffer_index_kernel;
-        int out_offset = (temp_rank / 2) * chunk_size + idx * SIMD_COMPUTE * UNROLL_SIZE;
+        size_t out_offset = (temp_rank / 2) * chunk_size + idx * SIMD_COMPUTE * UNROLL_SIZE;
 #pragma unroll
         for (uint32_t i = 0; i < UNROLL_SIZE; i++) {
             //save the all sum in the second half of the temp slot
@@ -291,7 +188,7 @@ template <uint32_t TEMP_WORLD, typename data_type, size_t align>
 void local_copy(int *even_ranks,
                 int idx,
                 const void *in_buffer,
-                uint32_t recv_size,
+                size_t recv_size,
                 int threads_already_processed,
                 void *temp_buffer[],
                 uint32_t temp_rank,
@@ -302,10 +199,10 @@ void local_copy(int *even_ranks,
     using namespace __ESIMD_NS;
     using namespace __ESIMD_ENS;
 
-    int chunk_size = threads_needed_per_chunk * SIMD_COMPUTE * UNROLL_SIZE;
-    int abs_offset_in_chunk = idx + threads_already_processed;
+    size_t chunk_size = threads_needed_per_chunk * SIMD_COMPUTE * UNROLL_SIZE;
+    size_t abs_offset_in_chunk = idx + threads_already_processed;
     // even rank copies odd chunks
-    int read_offset = abs_offset_in_chunk * SIMD_COMPUTE * UNROLL_SIZE;
+    size_t read_offset = abs_offset_in_chunk * SIMD_COMPUTE * UNROLL_SIZE;
 
     simd<data_type, SIMD_COMPUTE * UNROLL_SIZE * TEMP_WORLD / 2> buffer;
     //#pragma unroll
@@ -342,7 +239,7 @@ void reduce_read_write(int *even_ranks,
                        int idx,
                        const void *in_buffer,
                        void *out_buffer,
-                       uint32_t recv_size,
+                       size_t recv_size,
                        int threads_already_processed,
                        void *temp_buffer[],
                        uint32_t temp_rank,
@@ -354,7 +251,7 @@ void reduce_read_write(int *even_ranks,
     using namespace __ESIMD_NS;
     using namespace __ESIMD_ENS;
 
-    int chunk_size = threads_needed_per_chunk * SIMD_COMPUTE * UNROLL_SIZE;
+    size_t chunk_size = threads_needed_per_chunk * SIMD_COMPUTE * UNROLL_SIZE;
 
     data_type *mdfi_ptr = (data_type *)temp_buffer[temp_rank ^ 1];
     mdfi_ptr += size_per_buffer_kernel * buffer_index_kernel;
@@ -371,8 +268,8 @@ void reduce_read_write(int *even_ranks,
         mdfi_ptr += chunk_size;
     }
 
-    int abs_offset_in_chunk = idx + threads_already_processed;
-    int read_offset = abs_offset_in_chunk * SIMD_COMPUTE * UNROLL_SIZE;
+    size_t abs_offset_in_chunk = idx + threads_already_processed;
+    size_t read_offset = abs_offset_in_chunk * SIMD_COMPUTE * UNROLL_SIZE;
     simd<data_type, SIMD_COMPUTE * UNROLL_SIZE * TEMP_WORLD / 2> local_buffer;
     //#pragma unroll
     for (uint32_t r = 0; r < TEMP_WORLD / 2; r++) {
@@ -440,7 +337,7 @@ template <uint32_t TEMP_WORLD, typename data_type, size_t align>
 void all_sum(int idx,
              const void *in_buffer,
              void *out_buffer,
-             uint32_t recv_size,
+             size_t recv_size,
              int threads_already_processed,
              void *temp_buffer[],
              uint32_t temp_rank,
@@ -451,11 +348,11 @@ void all_sum(int idx,
     using namespace __ESIMD_NS;
     using namespace __ESIMD_ENS;
 
-    int chunk_size = threads_needed_per_chunk * SIMD_COMPUTE * UNROLL_SIZE;
+    size_t chunk_size = threads_needed_per_chunk * SIMD_COMPUTE * UNROLL_SIZE;
     //read the input data
     data_type *ptr = (data_type *)temp_buffer[temp_rank];
     ptr += size_per_buffer_kernel * buffer_index_kernel;
-    int read_offset = idx * SIMD_COMPUTE * UNROLL_SIZE;
+    size_t read_offset = idx * SIMD_COMPUTE * UNROLL_SIZE;
     simd<data_type, SIMD_COMPUTE * UNROLL_SIZE * TEMP_WORLD / 2> buffer;
     //#pragma unroll
     for (uint32_t r = 0; r < TEMP_WORLD / 2; r++) {
@@ -485,7 +382,7 @@ void all_sum(int idx,
 
     //store the result
     data_type *write_ptr = (data_type *)out_buffer;
-    int write_offset = (idx + threads_already_processed) * SIMD_COMPUTE * UNROLL_SIZE;
+    size_t write_offset = (idx + threads_already_processed) * SIMD_COMPUTE * UNROLL_SIZE;
     if (write_offset + SIMD_COMPUTE * UNROLL_SIZE <= recv_size) {
         write_ptr += write_offset;
 #pragma unroll
@@ -575,7 +472,7 @@ public:
     ccl::event reduce_scatter(sycl::queue &queue,
                               const void *send_buf,
                               void *out_buffer,
-                              uint32_t recv_size,
+                              size_t recv_size,
                               bool &done) {
         sycl::event e;
         // check local alignment
@@ -602,7 +499,7 @@ private:
     ccl::event reduce_scatter_copy(sycl::queue &queue,
                                    const void *send_buf,
                                    void *out_buffer,
-                                   uint32_t recv_size,
+                                   size_t recv_size,
                                    bool &done) {
         using namespace __ESIMD_NS;
         using namespace __ESIMD_ENS;
@@ -633,28 +530,22 @@ private:
             even_ranks[i] = even_comm->get_node_rank(i);
             if (even_ranks[i] == (int)temp_rank)
                 my_rank_index = i;
-            //printf("even rank %d: %d neighbor: %d\n", i, even_ranks[i], even_ranks[i] ^ 1);
         }
         int size_per_buffer_kernel __attribute__((unused)) = size_per_buffer / sizeof(data_type);
         int size_per_buffer_for_sync_kernel __attribute__((unused)) =
             size_per_buffer_kernel / (sizeof(int) / sizeof(data_type));
-        //int buffer_index_kernel = buffer_index;
-        int outerloop_iter_count; //Since 16 elements in temp buffer is used to process 8 element output, the outer loop count must be doubled roughly.
         int sync_reset_counter = 0;
         int buffer_index_kernel_for_sync = buffer_index;
         int outer_iter;
 
         //this is the outerloop count that requires full hw thread count.
         //This doesnt include the outloop iteration that only needs partial thread count
-        outerloop_iter_count = recv_size / max_count_per_rank;
+        int outerloop_iter_count = recv_size / max_count_per_rank;
 
         //uint32_t total_threads_needed_sync = 1;
         int wg_size __attribute__((unused)) = 1;
         int start, end;
 
-        //printf("[%d] max_count_per_rank: %d max_threads_per_MAX_COUNT: %d max_elements_per_MAX_COUNT: %d outerloop_iter_count: %d\n",
-        // temp_rank, max_count_per_rank, max_threads_per_MAX_COUNT, max_elements_per_MAX_COUNT, outerloop_iter_count);
-        //init the sw pipeline
         int sw_pipeline_insert_index = 0;
         int sw_pipeline_insert_counter = 0;
         int sw_pipeline_kernel_state[COPY_KERNEL_NUM];
@@ -665,18 +556,17 @@ private:
         }
 
         int first_iter = 1;
+        uint32_t threads_needed_per_chunk = max_count_per_rank / (SIMD_COMPUTE * UNROLL_SIZE);
         for (int iter = 0; iter < 2; iter++) {
             uint32_t total_threads_needed;
-            uint32_t threads_needed_per_chunk;
             if (iter == 1) //if second iteration, then handle the partial usage of the temp buffer
             {
                 //if there is little more left to compute, then finish them
                 if (outerloop_iter_count * max_count_per_rank < recv_size) {
                     start = outerloop_iter_count;
                     end = start + 1;
-                    //total_threads_needed = (recv_size - start * max_elements_per_MAX_COUNT + SIMD_COMPUTE * temp_world - 1) / (SIMD_COMPUTE * temp_world);
                     uint32_t leftover = recv_size - outerloop_iter_count * max_count_per_rank;
-                    threads_needed_per_chunk =
+                    total_threads_needed =
                         (leftover + SIMD_COMPUTE * UNROLL_SIZE - 1) / (SIMD_COMPUTE * UNROLL_SIZE);
                 }
                 else {
@@ -686,20 +576,17 @@ private:
             else {
                 start = 0;
                 end = outerloop_iter_count;
-                //total_threads_needed = max_threads_per_MAX_COUNT;
-                threads_needed_per_chunk = max_count_per_rank / (SIMD_COMPUTE * UNROLL_SIZE);
+                total_threads_needed = max_count_per_rank / (SIMD_COMPUTE * UNROLL_SIZE);
 
                 if (end == 0)
                     continue; //there is nothing to do when end is 0 so check the next iter.
             }
-            total_threads_needed = threads_needed_per_chunk;
 
             int innerloop_iter_count = (total_threads_needed + HW_THREAD_COUNT - 1) / HW_THREAD_COUNT;
             uint32_t persist_threads_needed = total_threads_needed;
             if (persist_threads_needed > HW_THREAD_COUNT)
                 persist_threads_needed = HW_THREAD_COUNT;
 
-            //printf("[%d] iter: %d outer_iter start: %d end: %d\n", temp_rank, iter, start, end);
             for (outer_iter = start; outer_iter < end + COPY_KERNEL_NUM - 1; outer_iter++) {
                 //if more outer_iter remaining since there is more new processing to do, then insert them to the SW pipeline.
                 //During the sw pipeline tail, there is nothing to dispatch.
@@ -713,10 +600,6 @@ private:
                     }
                     sw_pipeline_insert_counter += threads_needed_per_chunk;
                 }
-
-                // printf("[%d] outer_iter: %d threads_already_processed: %d %d %d sw_pipeline_kernel_state: %x %x %x\n", temp_rank, outer_iter,
-                // threads_already_processed[0], threads_already_processed[1], threads_already_processed[2], sw_pipeline_kernel_state[0],
-                // sw_pipeline_kernel_state[1], sw_pipeline_kernel_state[2]);
 
                 if (!first_iter) {
                     //sync all the ranks within the single GPU.
@@ -825,9 +708,6 @@ private:
                     else
                         sw_pipeline_kernel_state[i] <<= 1;
                 }
-
-                //std::cout << "rank" << temp_rank << " iter" << iter << " outer_iter" << outer_iter << " kernel1 done." << "\n";
-
             } // end of outer_iter
         } // end of for iter = 2
 
@@ -840,7 +720,7 @@ private:
     ccl::event reduce_scatter_nocopy(sycl::queue &queue,
                                      const void *send_buf,
                                      void *out_buffer,
-                                     uint32_t recv_size,
+                                     size_t recv_size,
                                      bool &done) {
         using namespace __ESIMD_NS;
         using namespace __ESIMD_ENS;
@@ -870,7 +750,6 @@ private:
             even_ranks[i] = even_comm->get_node_rank(i);
             if (even_ranks[i] == (int)temp_rank)
                 my_rank_index = i;
-            //printf("even rank %d: %d neighbor: %d\n", i, even_ranks[i], even_ranks[i] ^ 1);
         }
         int size_per_buffer_kernel = size_per_buffer / sizeof(data_type);
         int size_per_buffer_for_sync_kernel = size_per_buffer_kernel / (sizeof(int) / sizeof(data_type));
@@ -888,12 +767,9 @@ private:
         //This doesnt include the outloop iteration that only needs partial thread count
         outerloop_iter_count = recv_size / max_count_per_rank;
 
-        //uint32_t total_threads_needed_sync = 1;
         int wg_size __attribute__((unused)) = 1;
         int start, end;
 
-        //printf("[%d] max_count_per_rank: %d max_threads_per_MAX_COUNT: %d max_elements_per_MAX_COUNT: %d outerloop_iter_count: %d\n",
-        // temp_rank, max_count_per_rank, max_threads_per_MAX_COUNT, max_elements_per_MAX_COUNT, outerloop_iter_count);
         //init the sw pipeline
         int sw_pipeline_insert_index = 0;
         int sw_pipeline_insert_counter = 0;
@@ -926,9 +802,9 @@ private:
         int align4 = all_aligned((void **)in_buffers, temp_world, recv_size * sizeof(data_type), 4);
 
         int first_iter = 1;
+        uint32_t threads_needed_per_chunk = max_count_per_rank / (SIMD_COMPUTE * UNROLL_SIZE);
         for (int iter = 0; iter < 2; iter++) {
             uint32_t total_threads_needed;
-            uint32_t threads_needed_per_chunk;
             if (iter == 1) //if second iteration, then handle the partial usage of the temp buffer
             {
                 //if there is little more left to compute, then finish them
@@ -937,7 +813,7 @@ private:
                     end = start + 1;
                     //total_threads_needed = (recv_size - start * max_elements_per_MAX_COUNT + SIMD_COMPUTE * temp_world - 1) / (SIMD_COMPUTE * temp_world);
                     uint32_t leftover = recv_size - outerloop_iter_count * max_count_per_rank;
-                    threads_needed_per_chunk =
+                    total_threads_needed =
                         (leftover + SIMD_COMPUTE * UNROLL_SIZE - 1) / (SIMD_COMPUTE * UNROLL_SIZE);
                 }
                 else {
@@ -948,19 +824,17 @@ private:
                 start = 0;
                 end = outerloop_iter_count;
                 //total_threads_needed = max_threads_per_MAX_COUNT;
-                threads_needed_per_chunk = max_count_per_rank / (SIMD_COMPUTE * UNROLL_SIZE);
+                total_threads_needed = max_count_per_rank / (SIMD_COMPUTE * UNROLL_SIZE);
 
                 if (end == 0)
                     continue; //there is nothing to do when end is 0 so check the next iter.
             }
-            total_threads_needed = threads_needed_per_chunk;
 
             int innerloop_iter_count = (total_threads_needed + HW_THREAD_COUNT - 1) / HW_THREAD_COUNT;
             uint32_t persist_threads_needed = total_threads_needed;
             if (persist_threads_needed > HW_THREAD_COUNT)
                 persist_threads_needed = HW_THREAD_COUNT;
 
-            //printf("iter: %d outer_iter start: %d end: %d\n", iter, start, end);
             for (outer_iter = start; outer_iter < end + NOCOPY_KERNEL_NUM - 1; outer_iter++) {
                 //if more outer_iter remaining since there is more new processing to do, then insert them to the SW pipeline.
                 //During the sw pipeline tail, there is nothing to dispatch.
@@ -984,7 +858,6 @@ private:
                                    0);
                 }
                 else {
-                    //sync all the ranks within the single GPU.
                     e = global_sync(queue,
                                     temp_rank,
                                     temp_world,
@@ -1011,7 +884,6 @@ private:
                             for (int ii = 0; ii < NOCOPY_KERNEL_NUM; ii++) {
                                 RUN_SECOND_KERNEL
                                 RUN_THIRD_KERNEL
-
                             } // end of for
                          });//parallel_for
                 }); //submit()

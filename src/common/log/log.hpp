@@ -28,7 +28,7 @@
 #include "oneapi/ccl/exception.hpp"
 #include "oneapi/ccl/types.hpp"
 
-std::ostream& operator<<(std::ostream& os, const ccl::datatype& dt);
+CCL_API std::ostream& operator<<(std::ostream& os, const ccl::datatype& dt);
 
 #define __FILENAME__ \
     ({ \
@@ -77,7 +77,7 @@ public:
     ccl_streambuf& operator=(const ccl_streambuf& other) = delete;
     ccl_streambuf& operator=(ccl_streambuf&& other) = delete;
 
-    friend std::ostream& operator<<(std::ostream& os, ccl_streambuf& buf);
+    CCL_API friend std::ostream& operator<<(std::ostream& os, ccl_streambuf& buf);
 
 private:
     size_t size;
@@ -135,9 +135,9 @@ public:
         level = lvl;
     }
 
-    static ccl_log_level get_log_level() noexcept {
-        return level;
-    }
+    static CCL_API ccl_log_level get_log_level() noexcept;
+
+    static CCL_API ccl_logger& get_instance();
 
     static bool is_root();
 
@@ -205,9 +205,7 @@ public:
         abort_on_throw = val;
     }
 
-    static bool is_abort_on_throw_enabled() {
-        return abort_on_throw;
-    }
+    static CCL_API bool is_abort_on_throw_enabled();
 
 private:
     static ccl_log_level level;
@@ -243,29 +241,27 @@ private:
         ss.flags(initial_flags);
     }
 
-    static void write_prefix(std::ostream& str);
+    CCL_API static void write_prefix(std::ostream& str);
 };
-
-extern ccl_logger logger;
 
 #define LOG_ERROR(...) \
     { \
-        if (logger.get_log_level() >= ccl_log_level::error) { \
-            logger.error("|CCL_ERROR| ", \
-                         basedir_static(__FILE__), \
-                         ":", \
-                         __LINE__, \
-                         " ", \
-                         __FUNCTION__, \
-                         ": ", \
-                         ##__VA_ARGS__); \
+        if (ccl_logger::get_instance().get_log_level() >= ccl_log_level::error) { \
+            ccl_logger::get_instance().error("|CCL_ERROR| ", \
+                                             basedir_static(__FILE__), \
+                                             ":", \
+                                             __LINE__, \
+                                             " ", \
+                                             __FUNCTION__, \
+                                             ": ", \
+                                             ##__VA_ARGS__); \
         } \
     }
 
 #define LOG_WARN(...) \
     { \
-        if (logger.get_log_level() >= ccl_log_level::warn) { \
-            logger.warn("|CCL_WARN| ", ##__VA_ARGS__); \
+        if (ccl_logger::get_instance().get_log_level() >= ccl_log_level::warn) { \
+            ccl_logger::get_instance().warn("|CCL_WARN| ", ##__VA_ARGS__); \
         } \
     }
 
@@ -273,57 +269,79 @@ extern ccl_logger logger;
 // rank in static variable.
 #define LOG_WARN_ROOT(...) \
     { \
-        if (logger.is_root()) { \
-            if (logger.get_log_level() >= ccl_log_level::warn) { \
-                logger.warn("|CCL_WARN| ", ##__VA_ARGS__); \
+        if (ccl_logger::get_instance().is_root()) { \
+            if (ccl_logger::get_instance().get_log_level() >= ccl_log_level::warn) { \
+                ccl_logger::get_instance().warn("|CCL_WARN| ", ##__VA_ARGS__); \
             } \
         } \
         else { \
-            if (logger.get_log_level() >= ccl_log_level::debug) { \
-                logger.debug("|CCL_DEBUG| ", \
-                             basedir_static(__FILE__), \
-                             ":", \
-                             __LINE__, \
-                             " ", \
-                             __FUNCTION__, \
-                             ": ", \
-                             ##__VA_ARGS__); \
+            if (ccl_logger::get_instance().get_log_level() >= ccl_log_level::debug) { \
+                ccl_logger::get_instance().debug("|CCL_DEBUG| ", \
+                                                 basedir_static(__FILE__), \
+                                                 ":", \
+                                                 __LINE__, \
+                                                 " ", \
+                                                 __FUNCTION__, \
+                                                 ": ", \
+                                                 ##__VA_ARGS__); \
             } \
         } \
     }
 
 #define LOG_INFO(...) \
     { \
-        if (logger.get_log_level() >= ccl_log_level::info) { \
-            logger.info("|CCL_INFO| ", ##__VA_ARGS__); \
+        if (ccl_logger::get_instance().get_log_level() >= ccl_log_level::info) { \
+            ccl_logger::get_instance().info("|CCL_INFO| ", ##__VA_ARGS__); \
+        } \
+    }
+
+// Only output log info on root
+#define LOG_INFO_ROOT(...) \
+    { \
+        if (ccl_logger::get_instance().is_root()) { \
+            if (ccl_logger::get_instance().get_log_level() >= ccl_log_level::info) { \
+                ccl_logger::get_instance().info("|CCL_INFO| ", ##__VA_ARGS__); \
+            } \
+        } \
+        else { \
+            if (ccl_logger::get_instance().get_log_level() >= ccl_log_level::debug) { \
+                ccl_logger::get_instance().debug("|CCL_DEBUG| ", \
+                                                 basedir_static(__FILE__), \
+                                                 ":", \
+                                                 __LINE__, \
+                                                 " ", \
+                                                 __FUNCTION__, \
+                                                 ": ", \
+                                                 ##__VA_ARGS__); \
+            } \
         } \
     }
 
 #define LOG_DEBUG(...) \
     { \
-        if (logger.get_log_level() >= ccl_log_level::debug) { \
-            logger.debug("|CCL_DEBUG| ", \
-                         basedir_static(__FILE__), \
-                         ":", \
-                         __LINE__, \
-                         " ", \
-                         __FUNCTION__, \
-                         ": ", \
-                         ##__VA_ARGS__); \
+        if (ccl_logger::get_instance().get_log_level() >= ccl_log_level::debug) { \
+            ccl_logger::get_instance().debug("|CCL_DEBUG| ", \
+                                             basedir_static(__FILE__), \
+                                             ":", \
+                                             __LINE__, \
+                                             " ", \
+                                             __FUNCTION__, \
+                                             ": ", \
+                                             ##__VA_ARGS__); \
         } \
     }
 
 #define LOG_TRACE(...) \
     { \
-        if (logger.get_log_level() >= ccl_log_level::trace) { \
-            logger.trace("|CCL_TRACE| ", \
-                         basedir_static(__FILE__), \
-                         ":", \
-                         __LINE__, \
-                         " ", \
-                         __FUNCTION__, \
-                         ": ", \
-                         ##__VA_ARGS__); \
+        if (ccl_logger::get_instance().get_log_level() >= ccl_log_level::trace) { \
+            ccl_logger::get_instance().trace("|CCL_TRACE| ", \
+                                             basedir_static(__FILE__), \
+                                             ":", \
+                                             __LINE__, \
+                                             " ", \
+                                             __FUNCTION__, \
+                                             ": ", \
+                                             ##__VA_ARGS__); \
         } \
     }
 

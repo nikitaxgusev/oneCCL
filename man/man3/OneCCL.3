@@ -1,8 +1,8 @@
-.TH "OneCCLvars" 3 "Tue Sep 17 2024" "Version 2021.14.0" "Intel® oneAPI Collective Communications Library" \" -*- nroff -*-
+.TH "OneCCLvars" 3 "Version 2021.15.0" "Intel® oneAPI Collective Communications Library" \" -*- nroff -*-
 .ad l
 .nh
 .SH NAME
-OneCCLvars
+OneCCLvars \- OneCCL Environment Variables
 .SH SYNOPSIS
 .br
 .PP
@@ -53,6 +53,10 @@ OneCCLvars
 .RI "\fBCCL_ENABLE_AUTO_CACHE\fP"
 .br
 .RI "Set this environment variable to enable cache model automatically for synchronous collectives with direct algorithms\&. "
+.ti -1c
+.RI "\fBCCL_ENABLE_OMP_ALLREDUCE\fP"
+.br
+.RI "Set this environment variable to use openmp threads for synchronous collectives with direct algorithms on host buffers\&. "
 .ti -1c
 .RI "\fBCCL_ALLGATHER\fP"
 .br
@@ -213,6 +217,10 @@ OneCCLvars
 .RI "\fBCCL_ZE_ENABLE_OVERSUBSCRIPTION_THROW\fP"
 .br
 .RI "Set to enable oversubscription throw for all collectives\&. "
+.ti -1c
+.RI "\fBCCL_SYCL_ALLTOALL_PROTOCOL\fP"
+.br
+.RI "Set this environment variable to select read or write based device-to-device data copy for the alltoall collective using device (GPU) buffers\&. "
 .ti -1c
 .RI "\fBCCL_DRMFD_DEV_RENDER_DIR_PATH\fP"
 .br
@@ -598,6 +606,32 @@ Arguments
 .PP
 .PP
 By-default: '1' 
+.SS "CCL_ENABLE_OMP_ALLREDUCE"
+
+.PP
+Set this environment variable to use openmp threads for synchronous collectives with direct algorithms on host buffers\&. Syntax 
+.br
+CCL_ENABLE_OMP_ALLREDUCE='<value>'
+.br
+
+.br
+Arguments
+.br
+'<value>' Description
+.br
+.IP "\(bu" 2
+0 Does not use openmp threads for allreduce\&.
+.br
+
+.IP "\(bu" 2
+1 Use openmp threads for allreduce (default)\&.
+.br
+
+.br
+
+.PP
+.PP
+By-default: '1' 
 .SS "CCL_KVS_CONNECTION_TIMEOUT"
 
 .PP
@@ -889,6 +923,25 @@ offload Using device buffers directly into mpi/ofi layer skipping prepost copies
 .PP
 .PP
 By-default: 'topo' if sycl and l0 are enabled, otherwise offload for ofi/mpi transport 
+.SS "CCL_SYCL_ALLTOALL_PROTOCOL"
+
+.PP
+Set this environment variable to select read or write based device-to-device data copy for the alltoall collective using device (GPU) buffers\&. Syntax CCL_SYCL_ALLTOALL_PROTOCOL='<value>'
+.PP
+Arguments
+.PP
+'<value>' Description
+.IP "\(bu" 2
+read Uses read based copy to transfer data across GPUs for the alltoall collective\&.
+.IP "\(bu" 2
+write Uses write based copy to transfer data across GPUs for the alltoall collective (default)\&.
+.PP
+.PP
+Description
+.PP
+Set this environment variable to select read or write based device-to-device data copy for the alltoall collective using device (GPU) buffers\&.
+.PP
+By-default: 'write' 
 .SS "CCL_WORKER_AFFINITY"
 
 .PP
@@ -1028,11 +1081,13 @@ By-default: '536870912'
 .SH "Author"
 .PP 
 Generated automatically by Doxygen for Intel® oneAPI Collective Communications Library from the source code\&.
-.TH "ExpOneCCLvars" 3 "Tue Sep 17 2024" "Version 2021.14.0" "Intel® oneAPI Collective Communications Library" \" -*- nroff -*-
+.TH "ExpOneCCLvars" 3 "Version 2021.15.0" "Intel® oneAPI Collective Communications Library" \" -*- nroff -*-
 .ad l
 .nh
 .SH NAME
-ExpOneCCLvars \- Experimental OneCCL Environment Variables Functionality of these variables has not been (fully) tested and, therefore, cannot be supported nor guaranteed\&.  
+ExpOneCCLvars \- Experimental OneCCL Environment Variables
+.PP
+ \- Experimental OneCCL Environment Variables Functionality of these variables has not been (fully) tested and, therefore, cannot be supported nor guaranteed\&.  
 
 .SH SYNOPSIS
 .br
@@ -1091,7 +1146,7 @@ ExpOneCCLvars \- Experimental OneCCL Environment Variables Functionality of thes
 .ti -1c
 .RI "\fBCCL_SYCL_ALLGATHERV_SCALEOUT_THRESHOLD\fP"
 .br
-.RI "Specify the threshold for the scaleout algorithm in allgatherv \&. "
+.RI "Specify the threshold for the scaleout algorithm in allgatherv\&. "
 .ti -1c
 .RI "\fBCCL_SYCL_ALLREDUCE_TMP_BUF\fP"
 .br
@@ -1170,14 +1225,14 @@ By-default: '1'
 
 .PP
 Specify the threshold for the medium size algorithm in allgatherv\&. Set the threshold in bytes to specify the medium size algorithm in the allgatherv collective\&. Default value is 2097152\&. '<value>'' : '>=0" 
+.SS "CCL_SYCL_ALLGATHERV_SCALEOUT_THRESHOLD"
+
+.PP
+Specify the threshold for the scaleout algorithm in allgatherv\&. Set the threshold in bytes to specify the scaleout algorithm in the allgatherv collective\&. Default value is 1048576\&. '<value>'' : '>=0" 
 .SS "CCL_SYCL_ALLGATHERV_SMALL_THRESHOLD"
 
 .PP
 Specify the threshold for the small size algorithm in allgatherv\&. Set the threshold in bytes to specify the small size algorithm in the allgatherv collective\&. Default value is 131072\&. '<value>'' : '>=0" 
-.SS "CCL_SYCL_ALLGATHERV_SCALEOUT_THRESHOLD"
-
-.PP
-Specify the threshold for the scaleout algorithm in allgatherv\&. Default value is 1048576\&. '<value>'' : '>=0"
 .SS "CCL_SYCL_ALLGATHERV_TMP_BUF"
 
 .PP

@@ -4,15 +4,15 @@
 Device Communication
 ====================
 
-The communication operations between devices are provided by `Communicator`_.
+The oneCCL Communicator defines a group of processes that communicate with each other.
 
-The example below demonstrates the main concepts of communication on device memory buffers.
+The following example demonstrates the main concepts of communication on device memory buffers.
+
+Consider a simple oneCCL ``allreduce`` example for GPU.
 
 .. rubric:: Example
 
-Consider a simple oneCCL ``allreduce`` example for GPU:
-
-1. Create oneCCL communicator objects with user-supplied size, rank <-> SYCL device mapping, SYCL context and key-value store:
+#. Create oneCCL communicator objects with user-supplied size, rank <-> SYCL device mapping, SYCL context and key-value store:
 
    .. code:: cpp
 
@@ -25,13 +25,13 @@ Consider a simple oneCCL ``allreduce`` example for GPU:
          ccl_context,
          kvs);
 
-2. Create oneCCL stream object from user-supplied ``sycl::queue`` object:
+#. Create oneCCL stream object from user-supplied ``sycl::queue`` object:
 
    .. code:: cpp
 
       auto stream = ccl::create_stream(sycl_queue);
 
-3. Initialize ``send_buf`` (in real scenario it is supplied by the user):
+#. Initialize ``send_buf`` by providing the input content. For example, you can create and initialize the ``send_buf`` parameter as follows:
 
    .. code:: cpp
 
@@ -42,7 +42,6 @@ Consider a simple oneCCL ``allreduce`` example for GPU:
       for (idx = 0; idx < elem_count; idx++) {
          send_buf_host_acc[idx] = rank;
       }
-
    .. code:: cpp
 
       /* or using SYCL USM */
@@ -50,7 +49,7 @@ Consider a simple oneCCL ``allreduce`` example for GPU:
          send_buf[idx] = rank;
       }
 
-4. For demonstration purposes, modify the ``send_buf`` on the GPU side:
+#. For demonstration purposes, modify the ``send_buf`` on the GPU side:
 
    .. code:: cpp
 
@@ -69,10 +68,13 @@ Consider a simple oneCCL ``allreduce`` example for GPU:
          send_buf[idx]+ = 1;
       }
 
-5. ``allreduce`` invocation performs reduction of values from all processes and then distributes the result to all processes. In this case, the result is an array with ``elem_count`` elements, where all elements are equal to the sum of arithmetical progression:
+   The ``allreduce`` invocation performs reduction of values from all processes and then distributes the result to all processes. In this case, the result is an array with ``elem_count`` elements, where all elements are equal to the sum of arithmetical progression:
 
    .. math::
       p \cdot (p + 1) / 2
+
+
+#. Execute the ``allreduce`` operation:
 
    .. code:: cpp
 
@@ -90,7 +92,7 @@ Consider a simple oneCCL ``allreduce`` example for GPU:
          e.wait();
       }
 
-6. Check the correctness of ``allreduce`` operation on the GPU:
+#. Verify that the ``allreduce`` operation is correct:
 
    .. code:: cpp
 
@@ -131,3 +133,11 @@ Consider a simple oneCCL ``allreduce`` example for GPU:
                break;
          }
       }
+
+If you encounter an error, make sure the oneCCL environment is configured correctly.
+
+Additional Resources
+====================
+
+- `OneCCL Communicator <https://uxlfoundation.github.io/oneAPI-spec/spec/elements/oneCCL/source/spec/main_objects.html#communicator>`_
+- `OneCCL ALLREDUCE communication pattern <https://uxlfoundation.github.io/oneAPI-spec/spec/elements/oneCCL/source/spec/collective_operations.html#allreduce>`_

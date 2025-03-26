@@ -64,6 +64,9 @@ if (CCL_ENABLE_SYCL AND CCL_ENABLE_ZE)
         coll/algorithms/allgatherv/sycl/allgatherv_large_sycl.cpp
         coll/algorithms/allgatherv/sycl/allgatherv_scaleout_sycl.cpp
 
+        coll/algorithms/alltoall/sycl/alltoall_sycl.cpp
+        coll/algorithms/alltoall/sycl/alltoall_large_sycl.cpp
+
         coll/algorithms/allreduce/sycl/allreduce_small_sycl.cpp
         coll/algorithms/allreduce/sycl/allreduce_medium_sycl.cpp
         coll/algorithms/allreduce/sycl/allreduce_medium_sycl_fp16.cpp
@@ -88,10 +91,18 @@ if (CCL_ENABLE_SYCL AND CCL_ENABLE_ZE)
         coll/algorithms/reduce_scatter/sycl/reduce_scatter_large_sycl_bf16.cpp
         coll/algorithms/reduce_scatter/sycl/reduce_scatter_scaleout_sycl.cpp
 
+        coll/algorithms/broadcast/sycl/broadcast_sycl.cpp
+        coll/algorithms/broadcast/sycl/broadcast_small_sycl.cpp
+
         coll/algorithms/utils/sycl_coll_base.cpp
         coll/algorithms/utils/sycl_pipe_send.cpp
         coll/algorithms/utils/sycl_selection.cpp
+    )
+    if (ENABLE_UMF)
+        list(APPEND EXTENSIONS_SRC
+            umf/ipc.cpp
         )
+    endif(ENABLE_UMF)
 endif(CCL_ENABLE_SYCL AND CCL_ENABLE_ZE)
 
 set(CCL_SRC
@@ -105,13 +116,9 @@ set(CCL_SRC
     atl/ofi/atl_ofi.cpp
     atl/ofi/atl_ofi_comm.cpp
     atl/ofi/atl_ofi_helper.cpp
-    atl/util/pm/pmi_resizable_rt/pmi_resizable.cpp
     atl/util/pm/pmi_resizable_rt/pmi_resizable_simple.cpp
     atl/util/pm/pmi_resizable_rt/pmi_resizable_simple_internal.cpp
-    atl/util/pm/pmi_resizable_rt/pmi_resizable/helper.cpp
     atl/util/pm/pmi_resizable_rt/pmi_resizable/kvs_keeper.cpp
-    atl/util/pm/pmi_resizable_rt/pmi_resizable/pmi_listener.cpp
-    atl/util/pm/pmi_resizable_rt/pmi_resizable/resizable_pmi.cpp
     atl/util/pm/pmi_resizable_rt/pmi_resizable/kvs/internal_kvs.cpp
     atl/util/pm/pmi_resizable_rt/pmi_resizable/kvs/internal_kvs_server.cpp
     atl/util/pm/pmi_resizable_rt/pmi_resizable/kvs/users_kvs.cpp
@@ -137,11 +144,11 @@ set(CCL_SRC
     coll/algorithms/allreduce/allreduce.cpp
     coll/algorithms/allreduce/allreduce_rma.cpp
     coll/algorithms/algorithm_utils.cpp
-    coll/algorithms/alltoall.cpp
+    coll/algorithms/alltoall/alltoall.cpp
     coll/algorithms/alltoallv.cpp
     coll/algorithms/barrier/barrier.cpp
-    coll/algorithms/bcast.cpp
-    coll/algorithms/broadcast.cpp
+    coll/algorithms/broadcast/bcast.cpp
+    coll/algorithms/broadcast/broadcast.cpp
     coll/algorithms/double_tree_ops.cpp
     coll/algorithms/recv.cpp
     coll/algorithms/reduce.cpp
@@ -164,6 +171,7 @@ set(CCL_SRC
     coll/selection/selector_send.cpp
 
     comm/atl_tag.cpp
+    comm/mt_comm.cpp
     comm/comm.cpp
     comm/comm_selector.cpp
 
@@ -193,6 +201,8 @@ set(CCL_SRC
     common/api_wrapper/mpi_api_wrapper.cpp
     common/api_wrapper/ofi_api_wrapper.cpp
     common/api_wrapper/pmix_api_wrapper.cpp
+    common/api_wrapper/umf_api_wrapper.cpp
+    common/api_wrapper/openmp_wrapper.cpp
 
     comp/bf16/bf16.cpp
     comp/bf16/bf16_intrisics.cpp
@@ -236,6 +246,7 @@ set(CCL_SRC
     sched/sched_restart_manager.cpp
     sched/sched_timer.cpp
 
+    topology/mt_topo_manager.cpp
     topology/topo_manager.cpp
 
     unordered_coll/unordered_coll.cpp
@@ -331,6 +342,11 @@ if (ENABLE_PMIX)
          ${PMIX_INCLUDE_DIR})
 endif()
 
+if (ENABLE_UMF)
+    list(APPEND SRC_INCLUDE_DIRS
+         ${UMF_INCLUDE_DIR})
+endif()
+
 list(APPEND SRC_LINK_LIBS
      dl
      pthread
@@ -420,3 +436,5 @@ if (ENABLE_MPI)
     install(DIRECTORY ${DEPS_DIR}/mpi/licensing/
             DESTINATION ${CCL_INSTALL_LICENSE}/mpi/)
 endif()
+
+add_subdirectory(ext)

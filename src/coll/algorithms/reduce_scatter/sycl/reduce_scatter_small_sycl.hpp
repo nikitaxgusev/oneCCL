@@ -713,7 +713,7 @@ public:
         e = queue.submit([&](sycl::handler &cgh) {
             cgh.parallel_for<Reduce_scatter_small_kernel_scalar<data_type, kernel_inner_loop_scalar, wg_size>>(
                 sycl::nd_range<1>({ total_threads_dispatched }, wg_size),
-                [=](sycl::nd_item<1> idx2) [[intel::reqd_sub_group_size(wg_size)]] {
+                [=](sycl::nd_item<1> idx2) [[sycl::reqd_sub_group_size(wg_size)]] {
                     //slm_init(1024);
                     uint32_t idx = idx2.get_global_id();
 

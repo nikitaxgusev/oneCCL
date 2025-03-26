@@ -277,6 +277,17 @@ create_communicators(int size,
     return detail::environment::instance().create_communicators(size, devices, context, kvs, attr);
 }
 
+template <class DeviceType, class ContextType>
+vector_class<communicator> CCL_API
+create_communicatorsExt(int size,
+                        const vector_class<pair_class<int, DeviceType>>& devices,
+                        const ContextType& context,
+                        shared_ptr_class<kvs_interface> kvs,
+                        const comm_attr& attr = default_comm_attr) {
+    return detail::environment::instance().create_communicatorsExt(
+        size, devices, context, kvs, attr);
+}
+
 /*!
  * \ingroup communicator
  * \overload
@@ -288,6 +299,17 @@ vector_class<communicator> CCL_API create_communicators(int size,
                                                         shared_ptr_class<kvs_interface> kvs,
                                                         const comm_attr& attr = default_comm_attr) {
     return detail::environment::instance().create_communicators(size, devices, context, kvs, attr);
+}
+
+template <class DeviceType, class ContextType>
+vector_class<communicator> CCL_API
+create_communicatorsExt(int size,
+                        const map_class<int, DeviceType>& devices,
+                        const ContextType& context,
+                        shared_ptr_class<kvs_interface> kvs,
+                        const comm_attr& attr = default_comm_attr) {
+    return detail::environment::instance().create_communicatorsExt(
+        size, devices, context, kvs, attr);
 }
 
 /*!
@@ -308,6 +330,29 @@ communicator CCL_API create_communicator(int size,
         kvs,
         attr);
 
+    if (comms.size() != 1)
+        throw ccl::exception("unexpected comm vector size");
+
+    return std::move(comms[0]);
+}
+
+/*!
+ * \ingroup communicator
+ * \overload
+ */
+template <class DeviceType, class ContextType>
+communicator CCL_API create_communicatorExt(int size,
+                                            int rank,
+                                            DeviceType& device,
+                                            const ContextType& context,
+                                            shared_ptr_class<kvs_interface> kvs,
+                                            const comm_attr& attr = default_comm_attr) {
+    auto comms = detail::environment::instance().create_communicatorsExt(
+        size,
+        ccl::vector_class<ccl::pair_class<int, ccl::device>>{ { rank, device } },
+        context,
+        kvs,
+        attr);
     if (comms.size() != 1)
         throw ccl::exception("unexpected comm vector size");
 
@@ -347,6 +392,17 @@ vector_class<communicator> CCL_API create_communicators(int size,
     return detail::environment::instance().create_communicators(size, devices, context, kvs, attr);
 }
 
+template <class DeviceType, class ContextType>
+vector_class<communicator> CCL_API
+create_communicatorsExt(int size,
+                        const vector_class<DeviceType>& devices,
+                        const ContextType& context,
+                        shared_ptr_class<kvs_interface> kvs,
+                        const comm_attr& attr = default_comm_attr) {
+    return detail::environment::instance().create_communicatorsExt(
+        size, devices, context, kvs, attr);
+}
+
 /*!
  * \ingroup communicator
  * \overload
@@ -367,18 +423,40 @@ communicator CCL_API create_communicator(int size,
  */
 communicator CCL_API create_communicator(const comm_attr& attr = default_comm_attr);
 
+} // namespace preview
+namespace v1 {
+
+/*************** SPLIT COMMUNICATOR *****************/
 /**
  * \ingroup communicator
  * \brief Splits communicators according to attributes.
+ *
+ * This API is deprecated as of version 2021.15.0. It will be removed in a future release.
+ *
  * @param attrs split attributes for local communicators
  * @return vector of communicators
  */
 vector_class<communicator> CCL_API
 split_communicators(const vector_class<pair_class<communicator, comm_split_attr>>& attrs);
 
-} // namespace preview
-
-namespace v1 {
+/**
+ * \ingroup communicator
+ * \brief Creates a new sub-communicator from an existing communicator.
+ *
+ * Creates one or more new communicators from an existing communicator.
+ * All ranks providing the same \p color will be placed in the same sub-communicator.
+ * Ranks within each sub-communicator are ordered according to the \p key.
+ *
+ * @param comm existing communicator from which the new subcommunicator(s) will be derived
+ * @param color determines which sub-communicator the calling rank is assigned to.
+ *              Ranks with the same color will be on the same sub-communicator.
+ *              If the color is different, the ranks will be on different sub-communicators.
+ * @param key defines the rank ordering within the new sub-communicator.
+ *            Ranks in the new communicator are sorted by ascending \p key.
+ *
+ * @return the newly created sub-communicator
+ */
+communicator CCL_API split_communicator(const communicator& comm, int color, int key);
 
 /****************** GROUP CALLS ********************/
 

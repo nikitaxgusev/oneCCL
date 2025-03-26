@@ -16,6 +16,7 @@
 #pragma once
 
 #include "coll/algorithms/utils/sycl_coll_base.hpp"
+#include "coll/algorithms/utils/sycl_selection.hpp"
 #include "coll/algorithms/reduce_scatter/sycl/reduce_scatter_sycl.hpp"
 #include "coll/coll_util.hpp"
 
@@ -251,12 +252,17 @@ inline sycl::event reduce_scatter_ring_nonblocking_impl(sycl::queue &q,
                                                         reduction reduction,
                                                         ccl_comm *comm,
                                                         const vector_class<event> &deps,
+                                                        bool original_deps,
+                                                        sycl_reduce_scatter_tune_attr tune_attr,
                                                         bool &done) {
     sycl::event sycl_e;
     int world = comm->size();
     int rank = comm->rank();
 
     auto ccl_dtype = ccl::global_data::get().dtypes->get(dtype);
+
+    // tuning parameters
+    size_t pipeline_chunk_size = tune_attr.pipeline_chunk_size;
 
     // prepare ring block counts/sizes, the last block handles the remainder
     size_t main_block_count = count / world;
@@ -270,7 +276,8 @@ inline sycl::event reduce_scatter_ring_nonblocking_impl(sycl::queue &q,
     // to make sure that buffer con hold the larges possible block
     size_t buf_size = last_block_size;
     // align an allocation size up to 4 bytes, to have a better vector reduction
-    size_t aligned_buf_size = (buf_size + 3) / 4 * 4;
+    int typesize = std::max(4, (int)ccl_dtype.size());
+    size_t aligned_buf_size = (buf_size + typesize - 1) / typesize * typesize;
     void *buffers[2] = { NULL };
     int to_free = 0;
     if (world > 2 || in_place) {
@@ -280,17 +287,21 @@ inline sycl::event reduce_scatter_ring_nonblocking_impl(sycl::queue &q,
         else {
             buffers[0] = sycl::malloc_device(aligned_buf_size * 2, q);
             to_free = 1;
+            LOG_WARN("reduce_scatter_ring_nonblocking device buffer not big enough");
         }
         buffers[1] = (char *)buffers[0] + aligned_buf_size;
     }
 
-    // use an out-of-order queue
-#ifndef ENABLE_DEBUG
-    static
-#endif
-        sycl::queue q_worker(q.get_device());
-
     std::vector<sycl::event> dep_events = get_sycl_events(deps);
+    // in case deps is from user, set up wait event for the out of order queue
+    if (original_deps) {
+        sycl_e = submit_wait_on_events(q, dep_events);
+        dep_events.clear();
+        dep_events.push_back(std::move(sycl_e));
+    }
+
+    // use an out-of-order queue
+    sycl::queue q_worker(q.get_device());
 
     auto reduce_invoke = [=]<int VS, int SGS>(sycl::queue &q,
                                               void *in1,
@@ -304,7 +315,7 @@ inline sycl::event reduce_scatter_ring_nonblocking_impl(sycl::queue &q,
         return q.submit([=](sycl::handler &h) {
             h.depends_on(l_dep_events);
             h.parallel_for(sycl::nd_range<1>(kernel_size, wg_size),
-                           //[=](sycl::nd_item<1> it) [[intel::reqd_sub_group_size(sg_size)]] {
+                           //[=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(sg_size)]] {
                            [=](sycl::nd_item<1> it) {
                                reduce_pair<T, vec_size>(in1, in2, out, reduce_count, it);
                            });
@@ -331,7 +342,13 @@ inline sycl::event reduce_scatter_ring_nonblocking_impl(sycl::queue &q,
 
     // calculate the number of chunks required for pipeline
     size_t nchunks;
-    pipe_prep(main_block_count, last_block_count, ccl_dtype.size(), nchunks);
+    pipe_prep(main_block_count, last_block_count, ccl_dtype.size(), pipeline_chunk_size, nchunks);
+    LOG_DEBUG("Reduce_scatter ring block_count: ",
+              main_block_count,
+              " nchunks: ",
+              nchunks,
+              " chunk_size: ",
+              pipeline_chunk_size);
 
     int index = 0;
     int iter = 0;
@@ -406,6 +423,7 @@ inline sycl::event reduce_scatter_ring_nonblocking_impl(sycl::queue &q,
     if (world > 2 || in_place) {
         if (to_free) {
             sycl_e = q.submit([=](sycl::handler &h) {
+                h.depends_on(sycl_e);
                 h.host_task([=]() {
                     sycl::free(buffers[0], q);
                 });
@@ -429,10 +447,13 @@ inline sycl::event reduce_scatter_ring_nonblocking(sycl::queue &q,
                                                    reduction reduction,
                                                    ccl_comm *comm,
                                                    const vector_class<event> &deps,
+                                                   bool original_deps,
+                                                   sycl_reduce_scatter_tune_attr &tune_attr,
                                                    bool &done) {
     size_t total_count = recv_count * comm->size();
+
     return reduce_scatter_ring_nonblocking_impl<T>(
-        q, send_buf, recv_buf, total_count, dtype, reduction, comm, deps, done);
+        q, send_buf, recv_buf, total_count, dtype, reduction, comm, deps, original_deps, tune_attr, done);
 }
 
 inline sycl::event reduce_scatter_ring(sycl::queue &q,
@@ -443,11 +464,13 @@ inline sycl::event reduce_scatter_ring(sycl::queue &q,
                                        reduction reduction,
                                        ccl_comm *comm,
                                        const vector_class<event> &deps,
+                                       bool original_deps,
+                                       sycl_reduce_scatter_tune_attr &tune_attr,
                                        bool &done) {
     auto lambda = [&]<typename T>() {
         if (!ccl::global_data::env().enable_op_sync) {
             return reduce_scatter_ring_nonblocking<T>(
-                q, send_buf, recv_buf, recv_count, dtype, reduction, comm, deps, done);
+                q, send_buf, recv_buf, recv_count, dtype, reduction, comm, deps, original_deps, tune_attr, done);
         }
         else {
             return reduce_scatter_ring_blocking<T>(

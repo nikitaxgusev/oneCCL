@@ -68,6 +68,7 @@ ccl::event run_reduce_scatter_small(ccl::datatype dtype,
 ccl::event reduce_scatter_small(const void* send_buf,
                                 void* recv_buf,
                                 size_t recv_count,
+                                size_t rem_count,
                                 ccl::datatype dtype,
                                 ccl::reduction reduction,
                                 ccl_comm* comm,
@@ -78,8 +79,7 @@ ccl::event reduce_scatter_small(const void* send_buf,
 
     auto lambda = [&]<typename T, int NE, int NP>() {
         return reduce_scatter_small_impl<T, NE, NP>(
-            send_buf, recv_buf, recv_count, dtype, reduction, comm, global_stream, deps);
+            send_buf, recv_buf, recv_count, rem_count, dtype, reduction, comm, global_stream, deps);
     };
-
     return invoke_collective(lambda, comm, dtype);
 }

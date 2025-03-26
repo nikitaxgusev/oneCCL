@@ -18,10 +18,11 @@
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#include <cstdint>
 #include <system_error>
 
 #include <sycl/sycl.hpp>
-#include <ext/intel/esimd.hpp>
+#include <sycl/ext/intel/esimd.hpp>
 
 #if defined(CCL_ENABLE_ZE) || defined(CCL_ENABLE_SYCL)
 #include "comm/comm_interface.hpp"
@@ -217,7 +218,67 @@ protected:
     bool initialized;
 };
 
-void pipe_prep(size_t min_msg_count, size_t max_msg_count, int dsize, size_t &nchunks);
+#ifdef CCL_ENABLE_UMF
+template <typename T, int N>
+std::array<T *, N> get_ipc_ptrs(std::shared_ptr<ccl_comm> comm,
+                                int handle_index,
+                                void *local_ptr,
+                                std::map<int, std::vector<umf_ipc_handle_t>> &ipc_handle_map,
+                                sycl::queue &q,
+                                sycl::device sycl_device,
+                                bool dummy_copy = false) {
+    std::array<T *, N> remote_ptrs;
+    int rank = comm->rank();
+    int size = comm->size();
+    remote_ptrs[rank] = static_cast<T *>(local_ptr);
+
+    for (int i = 1; i < size; ++i) {
+        int peer_rank = (rank + i) % size;
+        int global_peer_rank = comm->get_global_rank(peer_rank);
+
+        if (ipc_handle_map[global_peer_rank].size() <= handle_index) {
+            CCL_THROW("handle_index is not expected: ",
+                      handle_index,
+                      ", count of ipc handles per rank",
+                      ipc_handle_map[global_peer_rank].size(),
+                      ", global peer rank: ",
+                      global_peer_rank);
+        }
+
+        umf_ipc_handle_t ipc_handle = ipc_handle_map[global_peer_rank][handle_index];
+        int dev_id = get_device_index(q, sycl_device);
+        void *ptr = nullptr;
+
+        if (!umf_memory_pools[dev_id]) {
+            if (create_level_zero_pool(
+                    q,
+                    sycl::get_native<sycl::backend::ext_oneapi_level_zero>(sycl_device),
+                    &umf_memory_pools[dev_id]) != 0) {
+                CCL_THROW("Failed to create UMF pool");
+            }
+        }
+
+        umf_ipc_handler_handle_t ipc_handler;
+        umf_result_t umf_result = umfPoolGetIPCHandler(umf_memory_pools[dev_id], &ipc_handler);
+        if (umf_result != UMF_RESULT_SUCCESS) {
+            CCL_THROW("Failed to create umfPoolGetIPCHandler");
+        }
+
+        umf_result = umfOpenIPCHandle(ipc_handler, ipc_handle, &ptr);
+        if (umf_result != UMF_RESULT_SUCCESS) {
+            CCL_THROW("Failed to open UMF IPC handle");
+        }
+        remote_ptrs[peer_rank] = static_cast<T *>(ptr);
+    }
+    return remote_ptrs;
+}
+#endif // CCL_ENABLE_UMF
+
+void pipe_prep(size_t min_msg_count,
+               size_t max_msg_count,
+               int dsize,
+               size_t pipeline_chunk_size,
+               size_t &nchunks);
 
 sycl::event pipe_sendrecv(sycl::queue &q,
                           const void *send_buf,
@@ -233,6 +294,37 @@ sycl::event pipe_sendrecv(sycl::queue &q,
                           ccl_comm *comm,
                           const ccl::vector_class<sycl::event> &deps,
                           bool use_rdma = false);
+
+sycl::event sendrecv_rdma(sycl::queue &q,
+                          const void *send_buf,
+                          size_t send_count,
+                          int dest,
+                          int sendtag,
+                          void *recv_buf,
+                          size_t recv_count,
+                          int src,
+                          int recvtag,
+                          ccl::datatype dtype,
+                          ccl_comm *comm,
+                          const ccl::vector_class<sycl::event> &deps);
+
+sycl::event gpu_send_plain(sycl::queue &q,
+                           const void *send_buf,
+                           size_t send_count,
+                           int dest,
+                           int sendtag,
+                           ccl::datatype dtype,
+                           ccl_comm *comm,
+                           const ccl::vector_class<sycl::event> &deps);
+
+sycl::event gpu_recv_plain(sycl::queue &q,
+                           void *recv_buf,
+                           size_t recv_count,
+                           int src,
+                           int recvtag,
+                           ccl::datatype dtype,
+                           ccl_comm *comm,
+                           const ccl::vector_class<sycl::event> &deps);
 
 class ccl_kernel_barrier_data {
 public:
@@ -274,16 +366,21 @@ std::pair<ccl_sched *, ze_handle_exchange_entry *> do_ipc_exchange(ccl_comm *com
                                                                    std::vector<void *> ptrs);
 
 void coll_init(ccl_comm *comm, ccl_stream *stream);
+void coll_initExt(ccl_comm *comm,
+                  std::unordered_map<int, std::unordered_map<int, std::vector<void *>>> &hash_table,
+                  ccl_stream *global_stream);
 
-ccl_kernel_barrier_data &get_kernel_barrier_data();
+ccl_kernel_barrier_data &get_kernel_barrier_data(ccl_comm *comm);
 
-void *get_tmp_buf(int index);
+size_t *get_sync_ptr(bool is_next, ccl_comm *comm = nullptr);
 
-std::array<void *, MAX_NODE_RANKS> get_remote_node_tmp_buf(int index);
+void *get_tmp_buf(int index, ccl_comm *comm = nullptr);
 
-std::array<void *, MAX_GPUS> get_remote_even_tmp_buf(int index);
+std::array<void *, MAX_NODE_RANKS> get_remote_node_tmp_buf(int index, ccl_comm *comm = nullptr);
 
-std::array<void *, MAX_TILES> get_remote_pair_tmp_buf(int index);
+std::array<void *, MAX_GPUS> get_remote_even_tmp_buf(int index, ccl_comm *comm = nullptr);
+
+std::array<void *, MAX_TILES> get_remote_pair_tmp_buf(int index, ccl_comm *comm = nullptr);
 
 size_t get_tmp_buf_size_per_rank();
 
@@ -371,6 +468,8 @@ ccl::event invoke_collective_type(L lambda, ccl::datatype dtype) {
             break;
         case ccl::datatype::float32: e = lambda.template operator()<float, NE, NP>(); break;
         case ccl::datatype::int32: e = lambda.template operator()<int, NE, NP>(); break;
+        case ccl::datatype::int64: e = lambda.template operator()<int64_t, NE, NP>(); break;
+        case ccl::datatype::uint64: e = lambda.template operator()<uint64_t, NE, NP>(); break;
         default: CCL_THROW("unsupported datatype ", dtype); break;
     }
     return e;
@@ -489,11 +588,35 @@ inline bool can_use_full_vector(const void *send_buf,
            ccl::global_data::env().sycl_full_vector;
 }
 
+inline sycl::event get_last_event(const sycl::queue &q) {
+#if __INTEL_LLVM_COMPILER >= 20250200
+    // For Intel LLVM compiler version 2025.2.0 or later
+    auto last_event_opt = q.ext_oneapi_get_last_event();
+    if (last_event_opt.has_value()) {
+        return last_event_opt.value();
+    }
+    else {
+        // Fallback to a default-constructed event if none is available
+        return sycl::event{};
+    }
+#else
+    // For older versions of the compiler
+    return q.ext_oneapi_get_last_event();
+#endif
+}
+
 inline sycl::event submit_wait_on_events(sycl::queue q, const std::vector<sycl::event> &deps) {
-    return q.submit([=](sycl::handler &h) {
-        h.depends_on(deps);
-        h.single_task([]() {});
-    });
+    if (deps.size() == 0) {
+        //if (deps.size() == 1)
+        //    q.ext_oneapi_set_external_event(deps[0]);
+        return get_last_event(q);
+    }
+    else {
+        return q.submit([=](sycl::handler &h) {
+            h.depends_on(deps);
+            h.single_task([]() {});
+        });
+    }
 }
 
 // call by ESIMD kernel
@@ -568,6 +691,18 @@ constexpr inline size_t get_num_elements() {
     }
     else {
         // use 4 bytes when full vector cannot be used
-        return 4 / sizeof(T);
+        size_t size = 4 / sizeof(T);
+        return size > 0 ? size : 1;
     }
 }
+
+inline bool is_pof2(size_t x) {
+    return x && !(x & (x - 1));
+}
+
+sycl::event sycl_average(sycl::queue &q,
+                         void *reduce_buf,
+                         const size_t reduce_count,
+                         const size_t total_ranks,
+                         ccl::datatype dtype,
+                         std::vector<sycl::event> &dep_events);

@@ -79,14 +79,14 @@
     }
 
 #ifdef CCL_FP16_AVX512FP16_COMPILER
-typedef __m512 (*ccl_fp16_reduction_func_ptr_512FP16)(__m512 a, __m512 b);
-FP16_TARGET_ATTRIBUTE_512FP16 __m512 fp16_sum_wrap_512FP16(__m512 a, __m512 b);
-FP16_TARGET_ATTRIBUTE_512FP16 __m512 fp16_prod_wrap_512FP16(__m512 a, __m512 b);
-FP16_TARGET_ATTRIBUTE_512FP16 __m512 fp16_min_wrap_512FP16(__m512 a, __m512 b);
-FP16_TARGET_ATTRIBUTE_512FP16 __m512 fp16_max_wrap_512FP16(__m512 a, __m512 b);
-FP16_TARGET_ATTRIBUTE_512FP16 __m512 fp16_reduce_512FP16(__m512 a,
-                                                         __m512 b,
-                                                         ccl_fp16_reduction_func_ptr_512FP16 op);
+typedef __m512h (*ccl_fp16_reduction_func_ptr_512FP16)(__m512h a, __m512h b);
+FP16_TARGET_ATTRIBUTE_512FP16 __m512h fp16_sum_wrap_512FP16(__m512h a, __m512h b);
+FP16_TARGET_ATTRIBUTE_512FP16 __m512h fp16_prod_wrap_512FP16(__m512h a, __m512h b);
+FP16_TARGET_ATTRIBUTE_512FP16 __m512h fp16_min_wrap_512FP16(__m512h a, __m512h b);
+FP16_TARGET_ATTRIBUTE_512FP16 __m512h fp16_max_wrap_512FP16(__m512h a, __m512h b);
+FP16_TARGET_ATTRIBUTE_512FP16 __m512h fp16_reduce_512FP16(__m512h a,
+                                                          __m512h b,
+                                                          ccl_fp16_reduction_func_ptr_512FP16 op);
 #endif // CCL_FP16_AVX512FP16_COMPILER
 
 CCL_FP16_DECLARE_ELEM_FUNCS(256);
@@ -153,10 +153,10 @@ FP16_INLINE_TARGET_ATTRIBUTE_AVX512FP16 void ccl_fp16_reduce_inputs_512FP16(
     const void* b,
     void* res,
     ccl_fp16_reduction_func_ptr_512FP16 op) {
-    __m512 vfp16_in, vfp16_inout;
-    vfp16_in = (__m512)_mm512_loadu_ph(a);
-    vfp16_inout = (__m512)_mm512_loadu_ph(b);
-    __m512 vfp16_out = fp16_reduce_512FP16(vfp16_in, vfp16_inout, op);
+    __m512h vfp16_in, vfp16_inout;
+    vfp16_in = _mm512_loadu_ph(a);
+    vfp16_inout = _mm512_loadu_ph(b);
+    __m512h vfp16_out = fp16_reduce_512FP16(vfp16_in, vfp16_inout, op);
     _mm512_storeu_ph(res, vfp16_out);
 }
 

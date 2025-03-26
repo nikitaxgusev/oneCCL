@@ -128,6 +128,15 @@ ccl::status ccl_coll_build_send(ccl_sched* sched,
                                 int peer,
                                 ccl_comm* comm);
 
+ccl::event ccl_allgather(const void* send_buf,
+                         void* recv_buf,
+                         size_t count,
+                         ccl::datatype dtype,
+                         const ccl_coll_attr& attr,
+                         ccl_comm* comm,
+                         const ccl_stream* stream,
+                         const std::vector<ccl::event>& deps);
+
 ccl_request* ccl_allgather_impl(const void* send_buf,
                                 void* recv_buf,
                                 size_t count,
@@ -136,6 +145,15 @@ ccl_request* ccl_allgather_impl(const void* send_buf,
                                 ccl_comm* comm,
                                 const ccl_stream* stream,
                                 const std::vector<ccl::event>& deps);
+
+ccl::event ccl_alltoall(const void* send_buf,
+                        void* recv_buf,
+                        size_t count,
+                        ccl::datatype dtype,
+                        const ccl_coll_attr& attr,
+                        ccl_comm* comm,
+                        const ccl_stream* stream,
+                        const std::vector<ccl::event>& deps);
 
 ccl::event ccl_allgatherv(const void* send_buf,
                           size_t send_count,
@@ -177,6 +195,15 @@ ccl_request* ccl_allreduce_impl(const void* send_buf,
                                 const ccl_stream* stream,
                                 const std::vector<ccl::event>& deps);
 
+ccl::event ccl_alltoall(const void* send_buf,
+                        void* recv_buf,
+                        size_t count,
+                        ccl::datatype dtype,
+                        const ccl_coll_attr& attr,
+                        ccl_comm* comm,
+                        const ccl_stream* stream,
+                        const std::vector<ccl::event>& deps);
+
 ccl_request* ccl_alltoall_impl(const void* send_buf,
                                void* recv_buf,
                                size_t count,
@@ -185,6 +212,16 @@ ccl_request* ccl_alltoall_impl(const void* send_buf,
                                ccl_comm* comm,
                                const ccl_stream* stream,
                                const std::vector<ccl::event>& deps);
+
+ccl::event ccl_alltoallv(const void* send_buf,
+                         const size_t* send_counts,
+                         void* recv_buf,
+                         const size_t* recv_counts,
+                         ccl::datatype dtype,
+                         const ccl_coll_attr& attr,
+                         ccl_comm* comm,
+                         const ccl_stream* stream,
+                         const std::vector<ccl::event>& deps);
 
 ccl_request* ccl_alltoallv_impl(const void* send_buf,
                                 const size_t* send_counts,
@@ -196,9 +233,22 @@ ccl_request* ccl_alltoallv_impl(const void* send_buf,
                                 const ccl_stream* stream,
                                 const std::vector<ccl::event>& deps);
 
+ccl::event ccl_barrier(ccl_comm* comm,
+                       const ccl_stream* stream,
+                       const std::vector<ccl::event>& deps);
+
 ccl_request* ccl_barrier_impl(ccl_comm* comm,
                               const ccl_stream* stream,
                               const std::vector<ccl::event>& deps);
+
+ccl::event ccl_broadcast(void* buf,
+                         size_t count,
+                         ccl::datatype dtype,
+                         int root,
+                         const ccl_coll_attr& attr,
+                         ccl_comm* comm,
+                         const ccl_stream* stream,
+                         const std::vector<ccl::event>& deps);
 
 ccl_request* ccl_broadcast_impl(void* buf,
                                 size_t count,
@@ -209,6 +259,16 @@ ccl_request* ccl_broadcast_impl(void* buf,
                                 const ccl_stream* stream,
                                 const std::vector<ccl::event>& deps);
 
+ccl::event ccl_broadcast(void* send_buf,
+                         void* recv_buf,
+                         size_t count,
+                         ccl::datatype dtype,
+                         int root,
+                         const ccl_coll_attr& attr,
+                         ccl_comm* comm,
+                         const ccl_stream* stream,
+                         const std::vector<ccl::event>& deps);
+
 ccl_request* ccl_broadcast_impl(void* send_buf,
                                 void* recv_buf,
                                 size_t count,
@@ -218,6 +278,17 @@ ccl_request* ccl_broadcast_impl(void* send_buf,
                                 ccl_comm* comm,
                                 const ccl_stream* stream,
                                 const std::vector<ccl::event>& deps);
+
+ccl::event ccl_reduce(const void* send_buf,
+                      void* recv_buf,
+                      size_t count,
+                      ccl::datatype dtype,
+                      ccl::reduction reduction,
+                      int root,
+                      const ccl_coll_attr& attr,
+                      ccl_comm* comm,
+                      const ccl_stream* stream,
+                      const std::vector<ccl::event>& deps);
 
 ccl_request* ccl_reduce_impl(const void* send_buf,
                              void* recv_buf,

@@ -77,7 +77,7 @@ public:
 
     COMM_IMPL_DECLARATION_VOID_REQUIRED
 
-    ccl::comm_interface_ptr split(const ccl::comm_split_attr& attr) override {
+    ccl::comm_interface_ptr split(int color, int key, bool split_external_use) override {
         return static_cast<ccl::comm_interface_ptr>(this);
     }
 

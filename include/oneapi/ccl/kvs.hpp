@@ -42,6 +42,8 @@ public:
     virtual vector_class<char> get(const string_class& key) = 0;
 
     virtual void set(const string_class& key, const vector_class<char>& data) = 0;
+
+    virtual int get_id() = 0;
 };
 
 class CCL_API kvs final : public kvs_interface {
@@ -57,7 +59,19 @@ public:
 
     void set(const string_class& key, const vector_class<char>& data) override;
 
+    int get_id() override;
+
 private:
+    // The KVS ID was introduced to facilitate multi-group execution in a multi-threading context.
+    // In the example provided, the user has:
+    // thread_groups{std::vector{1, 3}, std::vector{0, 2}};
+    // kvss{ccl::create_main_kvs(), ccl::create_main_kvs()};
+    //
+    // The KVS ID ensures the uniqueness of a specific thread group, enabling the creation of a communicator for that group.
+    // This is a temporary solution to ensure uniqueness, but it currently supports multi-group execution for multi-threading.
+    static constexpr int invalid_kvs_id = -1;
+    static std::atomic<int> id_counter;
+
     friend class ccl::detail::environment;
 
     template <class T>
@@ -69,6 +83,7 @@ private:
 
     address_type addr;
     unique_ptr_class<base_kvs_impl> pimpl;
+    int id = invalid_kvs_id;
 };
 
 } // namespace v1

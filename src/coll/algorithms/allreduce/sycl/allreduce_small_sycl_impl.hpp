@@ -157,7 +157,10 @@ ccl::event allreduce_small_impl(const void *send_buf,
 
     std::vector<sycl::event> dep_events = get_sycl_events(deps);
     sycl::event kernel_event;
-
+    if (comm->is_multi_thread_instance() == true) {
+        pthread_barrier_wait(
+            &ccl::global_data::get().shared_data->barrier_waits[comm->global_current_id]);
+    }
     // VS : vec_size, SGS : sub_group_size, LB : use_local_barrier, GB: use_global_barrier
     auto reduce_sum_invoke =
         [=, &q]<int VS, int SGS, int LB, int GB, typename AT = sycl::vec<T, VS>>(
@@ -181,17 +184,16 @@ ccl::event allreduce_small_impl(const void *send_buf,
             }
         }
 
-        ccl_kernel_barrier_data kernel_barrier_data = get_kernel_barrier_data().inc_slot();
+        ccl_kernel_barrier_data kernel_barrier_data = get_kernel_barrier_data(comm).inc_slot();
         // if global barrier is not used, then do not increment the barrier counter
         ccl_comm_barrier_data comm_barrier_data =
             GB ? node_comm->barrier_inc() : node_comm->barrier_data();
 
         sycl::event local_event = q.submit([=](sycl::handler &h) {
             h.depends_on(l_dep_events);
-
             h.parallel_for(
                 sycl::nd_range<1>(kernel_size, wg_size),
-                [=](sycl::nd_item<1> it) [[intel::reqd_sub_group_size(sg_size)]] {
+                [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(sg_size)]] {
                     reduce_sum<T, N, VS, use_block, LB, GB, 1, 1, AT>(send_buf,
                                                                       recv_buf,
                                                                       local_tmp_buf,
@@ -221,7 +223,10 @@ ccl::event allreduce_small_impl(const void *send_buf,
 
         return local_event;
     };
-
+    if (comm->is_multi_thread_instance() == true) {
+        pthread_barrier_wait(
+            &ccl::global_data::get().shared_data->barrier_waits[comm->global_current_id]);
+    }
     // run the three phases of collective as separate kernels.
     // when cpu barrier is enabled we cannot use single gpu kernel
     // since control has to go to cpu and perform the barrier.
@@ -314,14 +319,14 @@ ccl::event allreduce_small_impl(const void *send_buf,
                 remote_ptrs_rank[i] = (char *)(remote_ptrs[i]) + offset * dsize;
             }
 
-            ccl_kernel_barrier_data kernel_barrier_data = get_kernel_barrier_data().inc_slot();
+            ccl_kernel_barrier_data kernel_barrier_data = get_kernel_barrier_data(comm).inc_slot();
             ccl_comm_barrier_data comm_barrier_data = node_comm->barrier_inc();
 
             kernel_event = q.submit([=](sycl::handler &h) {
                 h.depends_on(dep_events);
                 h.parallel_for(
                     sycl::nd_range<1>(kernel_size, wg_size),
-                    [=](sycl::nd_item<1> it) [[intel::reqd_sub_group_size(sg_size)]] {
+                    [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(sg_size)]] {
                         // <vec_size, use_block, use_local_barrier, use_global_barrier, read_all, multiplier>
                         reduce_sum_general<T, N, vec_size, 1, 1, 1, 0, N>(send_buf,
                                                                           recv_buf,
@@ -341,7 +346,7 @@ ccl::event allreduce_small_impl(const void *send_buf,
                 h.depends_on(kernel_event);
                 h.parallel_for(
                     sycl::nd_range<1>(kernel_size, wg_size),
-                    [=](sycl::nd_item<1> it) [[intel::reqd_sub_group_size(sg_size)]] {
+                    [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(sg_size)]] {
                         // global communication barrier across ranks
                         comm_barrier(comm_barrier_data_next, it);
 
@@ -352,5 +357,19 @@ ccl::event allreduce_small_impl(const void *send_buf,
         }
     }
 
+    // do the average reduction separately after sum
+    if (reduction == ccl::reduction::avg) {
+        // set dependencies
+        std::vector<sycl::event> avg_deps_evs;
+        avg_deps_evs.push_back(kernel_event);
+
+        LOG_DEBUG("allreduce_small calculate average on counts: ", count, ", ranks: ", comm_size);
+        kernel_event = sycl_average(q, recv_buf, count, comm_size, dtype, avg_deps_evs);
+    }
+
+    if (comm->is_multi_thread_instance() == true) {
+        pthread_barrier_wait(
+            &ccl::global_data::get().shared_data->barrier_waits[comm->global_current_id]);
+    }
     return ccl::event::create_from_native(kernel_event);
 }

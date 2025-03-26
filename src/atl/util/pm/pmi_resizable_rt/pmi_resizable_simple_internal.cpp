@@ -64,12 +64,14 @@ atl_status_t pmi_resizable_simple_internal::pmrt_init() {
     }
 
     if (!can_use_internal_kvs()) {
+        LOG_DEBUG("custom kvs is used");
         local_id = k->get_local_id();
         ATL_CHECK_STATUS(registration(), "registration failed");
         // update local_id for the next comm create
         k->set_local_id(local_id + 1);
     }
     else {
+        LOG_DEBUG("internal kvs is used");
         ATL_CHECK_STATUS(get_local_kvs_id(local_id), "failed to get local id");
         ATL_CHECK_STATUS(barrier_full_reg(), "failed to full_barrier info register");
 

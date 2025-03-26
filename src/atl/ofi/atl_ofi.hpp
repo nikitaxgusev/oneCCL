@@ -196,7 +196,8 @@ public:
     }
 
     atl_status_t get_rank2proc_map(std::shared_ptr<ipmi> pmi,
-                                   std::vector<int>& rank2proc_map) override;
+                                   std::vector<int>& rank2proc_map,
+                                   atl_proc_coord_t coord) override;
 
     std::string to_string() override;
 
@@ -217,6 +218,22 @@ private:
                                 std::shared_ptr<ipmi> pmi,
                                 bool log_on_error);
     fi_addr_t atl_ofi_get_addr(atl_ofi_prov_t* prov, int proc_idx, size_t ep_idx);
+
+    atl_status_t exchange_hostnames_if_enabled(std::shared_ptr<ipmi> pmi);
+    void handle_address_table_update(atl_ofi_prov_t& prov,
+                                     size_t old_prov_ep_names_size,
+                                     size_t new_ep_names_count,
+                                     const std::vector<std::vector<char>>& prov_ep_names,
+                                     atl_ofi_ctx_t& ctx,
+                                     size_t length = 0,
+                                     void* shared_memory = nullptr);
+    bool process_address_name(std::vector<std::vector<char>>& prov_ep_names,
+                              std::vector<int>& rank2proc_map,
+                              const std::vector<char>& addr_name_input,
+                              bool is_shm,
+                              size_t named_ep_count,
+                              int rank);
+    // void shm_barrier(void* mem, int local_size);
 
     atl_ofi_ctx_t ctx;
 

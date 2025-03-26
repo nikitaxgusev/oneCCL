@@ -201,6 +201,19 @@ constexpr int topo_manager::max_domain_count;
 void topo_manager::init(std::shared_ptr<atl_base_comm> atl_comm,
                         std::shared_ptr<ccl::device> device,
                         std::shared_ptr<ccl::context> context) {
+    host_info_vec.clear();
+    intra_card_colors.clear();
+    inter_card_colors.clear();
+    uuids.clear();
+    rank_info_vec.clear();
+    domains.clear();
+
+#if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE)
+    ze_rank_info_vec.clear();
+    p2p_matrix.clear();
+    fabric_ports.clear();
+#endif // CCL_ENABLE_SYCL && CCL_ENABLE_ZE
+
     base_init(atl_comm, device, context);
     if (device) {
         // TODO: move intra/inter card logic under ZE define
@@ -218,6 +231,15 @@ int topo_manager::get_intra_card_color(int rank) const {
 
 int topo_manager::get_inter_card_color(int rank) const {
     return inter_card_colors[rank];
+}
+
+// for MT:
+std::vector<int> topo_manager::get_intra_card_colors() const {
+    return intra_card_colors;
+}
+
+std::vector<int> topo_manager::get_inter_card_colors() const {
+    return inter_card_colors;
 }
 
 std::string topo_manager::get_uuid(int rank) const {
@@ -366,7 +388,8 @@ bool topo_manager::build_fabric_connectivity_matrix(
     bool is_matrix_connected = true;
     std::vector<std::pair<ze_fabric_vertex_handle_t, char>> all_vertices;
 
-    if (driver_props.driverVersion < 17002026) {
+    if (driver_props.driverVersion < 17002962) {
+        LOG_DEBUG("multi-hop fabric connectivity check is disabled");
         bool is_include_devices = true;
         bool is_include_sub_devices_enabled = false;
 
@@ -400,6 +423,7 @@ bool topo_manager::build_fabric_connectivity_matrix(
         }
     }
     else {
+        LOG_DEBUG("multi-hop fabric connectivity check is enabled");
         for (const auto& device : devices) {
             ze_fabric_vertex_handle_t vertex = nullptr;
             ZE_CALL(zeDeviceGetFabricVertexExp, (device, &vertex));
@@ -594,9 +618,11 @@ domains_t topo_manager::parse_topo_env() {
 std::string topo_manager::to_string() const {
     std::stringstream ss;
 
-    ss << "\n{\n"
-       << "  comm_size: " << comm->get_size() << "\n"
-       << "  single_node: " << is_single_node << "\n"
+    ss << "\n{\n";
+    if (comm != nullptr) {
+        ss << "  comm_size: " << comm->get_size() << "\n";
+    }
+    ss << "  single_node: " << is_single_node << "\n"
        << "  single_card: " << is_single_card << "\n"
        << "  host_rank_counts: ";
 
@@ -966,8 +992,7 @@ fabric_ports_t topo_manager::get_fabric_ports() {
     std::vector<zes_fabric_port_handle_t> ports(port_count);
     ZE_CALL(zesDeviceEnumFabricPorts, ((zes_device_handle_t)ze_device, &port_count, ports.data()));
 
-    // TODO: revert back to "false" when MLSL-3007 is fixed
-    bool use_all_ports = true;
+    bool use_all_ports = false;
     if (ccl::ze::get_device_family(ze_device) == ccl::device_family::unknown) {
         LOG_WARN("device_family is unknown, topology discovery could be incorrect,"
                  " it might result in suboptimal performance");
@@ -980,6 +1005,13 @@ fabric_ports_t topo_manager::get_fabric_ports() {
     if (ccl::global_data::env().atl_transport == ccl_atl_ofi) {
         use_all_ports = true;
     }
+
+    // topo port discovery not used for implicit mode
+    auto& rank_info = ze_rank_info_vec[comm->get_rank()];
+    if (rank_info.subdev_count >= 2) {
+        use_all_ports = true;
+    }
+
     LOG_DEBUG("use all fabric ports: ", use_all_ports);
 
     std::vector<topo_ze_port_info> my_ports;

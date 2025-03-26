@@ -59,7 +59,7 @@ representative at an online or offline event.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the community leaders responsible for enforcement at
+reported to the community leaders responsible for enforcement at oneccl.maintainers@intel.com
 .
 All complaints will be reviewed and investigated promptly and fairly.
 
@@ -117,6 +117,9 @@ the community.
 This Code of Conduct is adapted from the [Contributor Covenant][homepage],
 version 2.0, available at
 https://www.contributor-covenant.org/version/2/0/code_of_conduct.html.
+
+Contributor Covenant was created by Coraline Ada Ehmke in 2014 and is 
+released under the CC BY 4.0 License.
 
 Community Impact Guidelines were inspired by [Mozilla's code of conduct
 enforcement ladder](https://github.com/mozilla/diversity).

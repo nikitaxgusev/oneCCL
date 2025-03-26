@@ -16,6 +16,8 @@
 #include "common/global/global.hpp"
 #include "common/api_wrapper/ze_api_wrapper.hpp"
 
+#include <sys/prctl.h>
+#include <sys/types.h>
 namespace ccl {
 namespace ze {
 
@@ -86,17 +88,56 @@ global_data_desc::global_data_desc() {
     }
     LOG_DEBUG("found devices: ", devices.size());
 
+    if (devices.size() > 0) {
+        LOG_INFO("Total hardware threads: ", devices[0].total_threads);
+    }
+
+    if (ccl::global_data::env().ze_ipc_exchange == ccl::ze::ipc_exchange_mode::pidfd) {
+        auto ppid = getppid();
+        // prctl(PR_SET_PTRACER, pid, 0, 0, 0):
+        // - PR_SET_PTRACER: Allow a specific process to trace the current process.
+        // - ppid: The process ID of the parent (retrieved using getppid()).
+        // - The remaining arguments (0, 0, 0) are unused for PR_SET_PTRACER, but they must be zero as per prctl's API requirements.
+        // Using prctl(PR_SET_PTRACER, ppid) ensures that only the parent process can trace the current process,
+        // providing a controlled and secure way to enable pidfd operations while limiting exposure to other processes.
+        if (prctl(PR_SET_PTRACER, ppid, 0, 0, 0) == -1) {
+            // Avoid using strerror(errno) directly because its output may contain reserved words
+            // (e.g., "Invalid argument") that could trigger CI failures.
+            LOG_DEBUG("prctl(PR_SET_PTRACER, ppid) did not complete successfully: ",
+                      errno,
+                      "; this may indicate that tracing is already enabled or not required.");
+        }
+        else {
+            LOG_DEBUG("prctl(PR_SET_PTRACER, ppid) executed successfully");
+        }
+    }
+
     cache = std::make_unique<ze::cache>(global_data::env().worker_count);
 
     topo_manager::detect_tune_port_count(devices);
 
     init_external_pointer_registration();
 
+#ifdef CCL_ENABLE_UMF
+    if (ccl::global_data::env().umf_enable) {
+        init_umf_mem_pools(devices);
+    }
+#endif // CCL_ENABLE_UMF
+
     LOG_INFO("initialized level-zero");
 }
 
 global_data_desc::~global_data_desc() {
     LOG_INFO("finalizing level-zero");
+
+    // TODO: Below there is a segfault during finalization.
+    // The first assumption is that it is a double-free or use-after-free scenario.
+    // Usually this is due to finalizing resources out of order or finalizing them twice.
+    // #ifdef CCL_ENABLE_UMF
+    //     if (ccl::global_data::env().umf_enable) {
+    //         destroy_umf_mem_pools(devices);
+    //     }
+    // #endif // CCL_ENABLE_UMF
 
     if (!global_data::env().ze_fini_wa) {
         cache.reset();
@@ -115,6 +156,12 @@ global_data_desc::~global_data_desc() {
     LOG_INFO("finalized level-zero");
 }
 
+// Instruct the UMD to create the internal graphics allocation for each system memory allocation
+// against a driver handle, instead of a command list handle.
+// By doing this, the UMD is able to reuse the internal graphics allocation for any new or reset list,
+// until the application decides to release the imported pointer. Any GPU driver handle fits.
+// This API is a part of exported extensions, therefore have to check for availability first.
+// Note: ze_data may be not initialized in some cases like stub backend mode or CCL_ZE_ENABLE=0
 void global_data_desc::init_external_pointer_registration() {
     if (!global_data::env().enable_buffer_cache || drivers.empty()) {
         external_pointer_registration_enabled = false;

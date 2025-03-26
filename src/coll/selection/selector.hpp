@@ -30,12 +30,6 @@
 #define CCL_BCAST_SHORT_MSG_SIZE      8192
 #define CCL_REDUCE_SHORT_MSG_SIZE     8192
 
-enum ccl_selection_border_type {
-    ccl_selection_border_left,
-    ccl_selection_border_right,
-    ccl_selection_border_both
-};
-
 struct ccl_selector_param {
     ccl_coll_type ctype = ccl_coll_last_value;
     size_t count = 0;
@@ -98,10 +92,6 @@ template <ccl_coll_type coll_id>
 struct ccl_algorithm_selector;
 
 template <typename algo_group_type>
-using ccl_selection_table_t =
-    std::map<size_t, std::pair<algo_group_type, ccl_selection_border_type>>;
-
-template <typename algo_group_type>
 using ccl_selection_table_iter_t = typename ccl_selection_table_t<algo_group_type>::const_iterator;
 
 template <typename algo_group_type>
@@ -116,6 +106,10 @@ struct ccl_algorithm_selector_base {
                        size_t left,
                        size_t right,
                        algo_group_type algo_id);
+    static std::string table_to_str(const ccl_selection_table_t<algo_group_type>& table);
+    static algo_group_type get_value_from_table(
+        size_t size,
+        const ccl_selection_table_t<algo_group_type>& table);
 };
 
 #define CCL_SELECTION_DECLARE_ALGO_SELECTOR(coll_id, algo_group_type) \

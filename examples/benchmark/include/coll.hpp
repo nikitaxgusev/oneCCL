@@ -91,6 +91,7 @@ private:
 typedef struct bench_init_attr {
     size_t buf_count;
     size_t max_elem_count;
+    size_t elem_offset;
     int inplace;
     size_t ranks_per_proc;
     int numa_node;
@@ -98,6 +99,7 @@ typedef struct bench_init_attr {
     sycl_mem_type_t sycl_mem_type;
     sycl_usm_type_t sycl_usm_type;
 #endif
+    int verbosity;
 } bench_init_attr;
 
 template <class OutDtype, class InDtype = OutDtype>
@@ -254,8 +256,18 @@ struct base_coll {
         return init_attr.buf_count;
     }
 
+    /* use for number of elements to send */
     size_t get_max_elem_count() const noexcept {
         return init_attr.max_elem_count;
+    }
+
+    size_t get_elem_offset() const noexcept {
+        return init_attr.elem_offset;
+    }
+
+    /* use to allocate buffers for coll */
+    size_t get_allocation_count() const noexcept {
+        return init_attr.max_elem_count + init_attr.elem_offset;
     }
 
 #ifdef CCL_ENABLE_SYCL

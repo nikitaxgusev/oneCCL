@@ -161,6 +161,7 @@ ccl::event allgatherv_scaleout_sycl(sycl::queue& q,
                                     ccl::datatype dtype,
                                     ccl_comm* comm,
                                     const ccl::vector_class<ccl::event>& deps,
+                                    bool original_deps,
                                     bool& done,
                                     bool direct,
                                     bool is_cpu_buffers) {

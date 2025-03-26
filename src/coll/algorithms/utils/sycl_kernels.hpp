@@ -15,9 +15,6 @@
 */
 #pragma once
 
-static constexpr size_t MAX_TILES = ccl::topo_manager::max_ranks_per_card;
-static constexpr size_t MAX_GPUS = ccl::topo_manager::max_ranks_per_plane;
-
 namespace ccl::v1 {
 struct impl_dispatch {
     template <class Object>
@@ -27,6 +24,11 @@ struct impl_dispatch {
 };
 }; // namespace ccl::v1
 
+struct sycl_ptrs_type {
+    void *mdfi_ptr_rd{ nullptr }, *mdfi_ptr_wr{ nullptr };
+    std::array<void *, MAX_GPUS> xelink_ptrs_rd, xelink_ptrs_wr;
+};
+
 template <typename T,
           sycl::access::address_space Space = sycl::access::address_space::global_space,
           sycl::access::decorated IsDecorated = sycl::access::decorated::yes>
@@ -35,7 +37,7 @@ get_multi_ptr(T *ptr) {
     return sycl::address_space_cast<Space, IsDecorated>(ptr);
 }
 
-template <typename T, int N, int vec_size, bool use_subgroup>
+template <typename T, int N, int vec_size>
 void inline copy_data(std::array<void *, MAX_GPUS> dst,
                       std::array<void *, MAX_GPUS> src,
                       const size_t count,
@@ -49,29 +51,19 @@ void inline copy_data(std::array<void *, MAX_GPUS> dst,
     int base = (idx / sgSize) * sgSize * vec_size;
     const long rem_elem_count = count - base;
 
-    if (use_subgroup && rem_elem_count > 0 && (size_t)rem_elem_count >= sgSize * vec_size) {
+    if (idx < packed_count) {
+        using AT = sycl::vec<T, vec_size>;
 #pragma unroll
         for (int i = 0; i < N; i++) {
-            const sycl::vec<T, vec_size> val =
-                sg.load<vec_size>(get_multi_ptr(&(((T *)src[i])[base])));
-            sg.store<vec_size>(get_multi_ptr(&(((T *)dst[i])[base])), val);
+            ((AT *)dst[i])[idx] = ((AT *)src[i])[idx];
         }
     }
     else {
-        if (idx < packed_count) {
-            using AT = sycl::vec<T, vec_size>;
+        const size_t new_idx = idx + (vec_size - 1) * packed_count;
+        if (new_idx < count) {
 #pragma unroll
             for (int i = 0; i < N; i++) {
-                ((AT *)dst[i])[idx] = ((AT *)src[i])[idx];
-            }
-        }
-        else {
-            const size_t new_idx = idx + (vec_size - 1) * packed_count;
-            if (new_idx < count) {
-#pragma unroll
-                for (int i = 0; i < N; i++) {
-                    ((T *)dst[i])[new_idx] = ((T *)src[i])[new_idx];
-                }
+                ((T *)dst[i])[new_idx] = ((T *)src[i])[new_idx];
             }
         }
     }
@@ -81,7 +73,6 @@ void inline copy_data(std::array<void *, MAX_GPUS> dst,
 inline void kernel_barrier(size_t *sync_ptr, const sycl::nd_item<1> it) {
     sycl::sub_group sg = it.get_sub_group();
     const size_t sidx = sg.get_local_id();
-
     if (sidx == 0) {
         // number of subgroups = global_size / sg_size
         const size_t num_sg = it.get_global_range()[0] / sg.get_local_range()[0];
@@ -145,5 +136,45 @@ inline void comm_barrier(ccl_comm_barrier_data barrier_data,
     }
 }
 
-static void *mdfi_ptr_rd = nullptr, *mdfi_ptr_wr = nullptr;
-static std::array<void *, MAX_GPUS> xelink_ptrs_rd, xelink_ptrs_wr;
+template <typename T>
+inline void reduce_average_kernel(void *buf, const size_t n, size_t idx) {
+    ((T *)buf)[idx] /= n;
+}
+
+template <typename T, int vec_size>
+inline void reduce_average(void *reduce_buf,
+                           const size_t count,
+                           const size_t average_divisor,
+                           const sycl::nd_item<1> it) {
+    const size_t idx = it.get_global_linear_id();
+    const size_t packed_count = count / vec_size;
+    if (idx < packed_count) {
+        using AT = sycl::vec<T, vec_size>;
+        reduce_average_kernel<AT>(reduce_buf, average_divisor, idx);
+    }
+    else {
+        const size_t new_idx = vec_size * packed_count + idx - packed_count;
+        if (new_idx < count) {
+            reduce_average_kernel<T>(reduce_buf, average_divisor, new_idx);
+        }
+    }
+}
+
+template <typename T, int vec_size, int SGS>
+inline sycl::event reduce_average_invoke(sycl::queue &q,
+                                         void *reduce_buf,
+                                         const size_t reduce_count,
+                                         const size_t average_divisor,
+                                         std::vector<sycl::event> &dep_events) {
+    constexpr int wg_size = SGS;
+    constexpr int sg_size = SGS;
+    int kernel_threads = reduce_count / vec_size + reduce_count % vec_size;
+    int kernel_size = (kernel_threads + wg_size - 1) / wg_size * wg_size;
+    sycl::event e = q.submit([=](sycl::handler &h) {
+        h.depends_on(dep_events);
+        h.parallel_for(sycl::nd_range<1>(kernel_size, wg_size), [=](sycl::nd_item<1> it) {
+            reduce_average<T, vec_size>(reduce_buf, reduce_count, average_divisor, it);
+        });
+    });
+    return e;
+}

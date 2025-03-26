@@ -18,7 +18,7 @@
 # -- Project information -----------------------------------------------------
 
 project = 'oneCCL'
-copyright = '2023'
+copyright = '2025'
 author = 'Intel'
 
 # The full version, including alpha/beta/rc tags

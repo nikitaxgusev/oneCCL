@@ -84,6 +84,7 @@ ccl::event reduce_scatter_large(const void *send_buf,
                                 const ccl::vector_class<ccl::event> &deps) {
     LOG_DEBUG("invoking reduce_scatter_large");
 
+    sycl_ptrs_type sycl_ptrs;
     std::shared_ptr<ccl_comm> pair_comm = comm->get_pair_comm();
     std::shared_ptr<ccl_comm> even_comm = comm->get_even_comm();
 
@@ -97,8 +98,11 @@ ccl::event reduce_scatter_large(const void *send_buf,
     // use tmp buf for types < 4 byte size with odd count or non 4 byte aligned data
     // use tmp buf when data count bytes is not 64 byte aligned
     // since tmp buf version performs better in that case
-    const bool is_tmp_used = ccl::global_data::env().sycl_reduce_scatter_tmp_buf ||
-                             ((!use_full_vector || !is_aligned) && ccl::global_data::env().sycl_auto_use_tmp_buf);
+    bool is_tmp_used = ccl::global_data::env().sycl_reduce_scatter_tmp_buf ||
+                       ((!use_full_vector || !is_aligned) && ccl::global_data::env().sycl_auto_use_tmp_buf);
+    if (even_comm->size() == 1) {
+        is_tmp_used = ccl::global_data::env().sycl_reduce_scatter_tmp_buf;
+    }
 
     if (is_tmp_used) {
         // global rank of pair_comm neighbors should be adjacent for using tmp buffer
@@ -116,16 +120,17 @@ ccl::event reduce_scatter_large(const void *send_buf,
         std::vector<void *> ptrs{ (void *)send_buf, recv_buf }; // index 0 and 1
         auto [sched, exchange_entry] = do_ipc_exchange(comm, global_stream, ptrs);
 
-        xelink_ptrs_rd = get_ipc_ptrs<void, MAX_GPUS>(even_comm, 0, (void *)send_buf, sched);
+        sycl_ptrs.xelink_ptrs_rd = get_ipc_ptrs<void, MAX_GPUS>(even_comm, 0, (void *)send_buf, sched);
         // use full vector (>= 8 bytes) if remote buffers and data size are 4 byte aligned
-        use_full_vector =
-            use_full_vector && all_aligned(xelink_ptrs_rd.data(), even_comm->size(), recv_count * dsize, 4);
+        use_full_vector = use_full_vector &&
+                          all_aligned(sycl_ptrs.xelink_ptrs_rd.data(), even_comm->size(), recv_count * dsize, 4);
 
         if (pair_comm->size() > 1) {
             assert(pair_comm->size() == MAX_TILES);
             int peer_pair_rank = pair_comm->rank() ? 0 : 1;
-            mdfi_ptr_rd = get_ipc_ptrs<void, MAX_TILES>(pair_comm, 0, (void *)send_buf, sched)[peer_pair_rank];
-            use_full_vector = use_full_vector && all_aligned(&mdfi_ptr_rd, 1, recv_count * dsize, 4);
+            sycl_ptrs.mdfi_ptr_rd =
+                get_ipc_ptrs<void, MAX_TILES>(pair_comm, 0, (void *)send_buf, sched)[peer_pair_rank];
+            use_full_vector = use_full_vector && all_aligned(&sycl_ptrs.mdfi_ptr_rd, 1, recv_count * dsize, 4);
         }
         delete exchange_entry;
         delete sched;
@@ -136,22 +141,22 @@ ccl::event reduce_scatter_large(const void *send_buf,
         coll_init(comm, global_stream);
         // 0 index is used for tmp work buffer and
         // 1 index is used to copy input data
-        xelink_ptrs_rd = get_remote_even_tmp_buf(1);
+        sycl_ptrs.xelink_ptrs_rd = get_remote_even_tmp_buf(1, comm);
         if (pair_comm->size() > 1) {
             assert(pair_comm->size() == MAX_TILES);
             int peer_pair_rank = pair_comm->rank() ? 0 : 1;
-            mdfi_ptr_rd = get_remote_pair_tmp_buf(1)[peer_pair_rank];
+            sycl_ptrs.mdfi_ptr_rd = get_remote_pair_tmp_buf(1, comm)[peer_pair_rank];
         }
     }
 
     auto lambda = [&]<typename T, int NE, int NP>() {
         if (use_full_vector) {
             return reduce_scatter_large_impl<T, NE, NP, true>(
-                send_buf, recv_buf, recv_count, dtype, reduction, comm, global_stream, deps);
+                send_buf, recv_buf, recv_count, dtype, reduction, comm, global_stream, sycl_ptrs, deps);
         }
         else {
             return reduce_scatter_large_impl<T, NE, NP, false>(
-                send_buf, recv_buf, recv_count, dtype, reduction, comm, global_stream, deps);
+                send_buf, recv_buf, recv_count, dtype, reduction, comm, global_stream, sycl_ptrs, deps);
         }
     };
 

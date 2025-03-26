@@ -554,6 +554,7 @@ void set_offload_pt2pt_mpi_env() {
 bool use_pt2pt_offload_algo() {
     bool res = true;
 
+    // TODO: deprecate offload for all pt2pt cases ?
     if (group_impl::is_group_active) {
         return false;
     }

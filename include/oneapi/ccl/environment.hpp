@@ -217,9 +217,24 @@ public:
                                                     const ContextType& context,
                                                     shared_ptr_class<kvs_interface> kvs,
                                                     const comm_attr& attr) const;
+    template <class DeviceType, class ContextType>
+    vector_class<communicator> create_communicatorsExt(
+        int comm_size,
+        const vector_class<DeviceType>& local_devices,
+        const ContextType& context,
+        shared_ptr_class<kvs_interface> kvs,
+        const comm_attr& attr) const;
 
     template <class DeviceType, class ContextType>
     vector_class<communicator> create_communicators(
+        int comm_size,
+        const vector_class<pair_class<int, DeviceType>>& local_rank_device_map,
+        const ContextType& context,
+        shared_ptr_class<kvs_interface> kvs,
+        const comm_attr& attr) const;
+
+    template <class DeviceType, class ContextType>
+    vector_class<communicator> create_communicatorsExt(
         int comm_size,
         const vector_class<pair_class<int, DeviceType>>& local_rank_device_map,
         const ContextType& context,
@@ -233,6 +248,16 @@ public:
         const ContextType& context,
         shared_ptr_class<kvs_interface> kvs,
         const comm_attr& attr) const;
+
+    template <class DeviceType, class ContextType>
+    vector_class<communicator> create_communicatorsExt(
+        int comm_size,
+        const map_class<int, DeviceType>& local_rank_device_map,
+        const ContextType& context,
+        shared_ptr_class<kvs_interface> kvs,
+        const comm_attr& attr) const;
+
+    communicator split_communicator(const communicator& comm, int color, int key) const;
 
     vector_class<communicator> split_communicators(
         const vector_class<pair_class<communicator, comm_split_attr>>& attrs) const;

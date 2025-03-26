@@ -147,6 +147,10 @@ public:
     int get_host_idx() const;
     int get_intra_card_color(int rank) const;
     int get_inter_card_color(int rank) const;
+    // for MT
+    std::vector<int> get_intra_card_colors() const;
+    std::vector<int> get_inter_card_colors() const;
+
     std::string get_uuid(int rank) const;
     bool has_same_ppn() const;
     bool has_same_domains() const;
@@ -171,6 +175,14 @@ public:
     bool is_oversubscription_detected = false;
     size_t get_unique_device_uuids_count() const;
 #endif // CCL_ENABLE_SYCL && CCL_ENABLE_ZE
+    // for MT:
+    void init(int size,
+              int rank,
+              int global_current_id,
+              std::shared_ptr<ccl::device> device_ptr,
+              std::shared_ptr<ccl::context> context_ptr);
+    rank_info_vec_t get_filtered_rank_info_vec(int filter_host_idx,
+                                               rank_info_vec_t in_rank_info_vec) const;
     rank_info_vec_t get_filtered_rank_info_vec(int filter_host_idx) const;
 
     static std::string generate_uuid();
@@ -189,7 +201,6 @@ private:
 
 #if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE)
     void fill_ze_colors();
-
     void fill_ze_intra_colors(const rank_info_vec_t& local_info_vec);
 
     void fill_ze_inter_colors();
@@ -212,18 +223,34 @@ private:
     static std::vector<std::string> get_subdomain_strings(const std::string& input_str);
 
     void build_host_info();
+    // for MT:
+    void build_host_info(int size, int rank, int global_current_id);
 
     void base_init(const std::shared_ptr<atl_base_comm>& atl_comm,
+                   const std::shared_ptr<ccl::device>& device,
+                   const std::shared_ptr<ccl::context>& context);
+    // for MT:
+    static void allgather(int size,
+                          int rank,
+                          const void* send_data,
+                          void* recv_data,
+                          int data_len,
+                          int global_current_id);
+
+    void base_init(int size,
+                   int rank,
+                   int global_current_id,
                    const std::shared_ptr<ccl::device>& device,
                    const std::shared_ptr<ccl::context>& context);
 #if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE)
     void ze_base_init(const std::shared_ptr<ccl::device>& device,
                       const std::shared_ptr<ccl::context>& context);
-
     bool oversubscription_detected(const ze_rank_info_vec_t& ze_rank_infos,
                                    const host_info_vec_t& host_infos);
 #endif // CCL_ENABLE_SYCL && CCL_ENABLE_ZE
     void post_init();
+    // for MT:
+    void post_init(int size, int rank, int global_current_id);
 
     std::shared_ptr<atl_base_comm> comm;
 

@@ -19,6 +19,9 @@ using namespace std;
 using namespace sycl;
 
 int main(int argc, char *argv[]) {
+    if (!check_example_args(argc, argv))
+        exit(1);
+
     size_t count = 10 * 1024 * 1024;
 
     int size = 0;
@@ -32,28 +35,22 @@ int main(int argc, char *argv[]) {
 
     atexit(mpi_finalize);
 
-    queue q;
-    sycl::property_list props;
-    if (argc > 3) {
-        if (strcmp("in_order", argv[3]) == 0) {
-            props = { sycl::property::queue::in_order{} };
-        }
+    test_args args(argc, argv, rank);
+
+    if (args.count != args.DEFAULT_COUNT) {
+        count = args.count;
     }
 
-    if (argc > 4) {
-        count = (size_t)std::atoi(argv[4]);
-    }
+    string device_type = argv[1];
+    string alloc_type = argv[2];
 
-    if (!create_sycl_queue(argc, argv, rank, q, props)) {
+    sycl::queue q;
+    if (!create_test_sycl_queue(device_type, rank, q, args))
         return -1;
-    }
 
     buf_allocator<int> allocator(q);
 
-    auto usm_alloc_type = usm::alloc::shared;
-    if (argc > 2) {
-        usm_alloc_type = usm_alloc_type_from_string(argv[2]);
-    }
+    auto usm_alloc_type = usm_alloc_type_from_string(alloc_type);
 
     if (!check_sycl_usm(q, usm_alloc_type)) {
         return -1;

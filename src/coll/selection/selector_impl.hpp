@@ -52,8 +52,7 @@ void ccl_selection_unpack_elem(size_t& size,
 }
 
 template <typename algo_group_type>
-void fill_table_from_str(ccl_algorithm_selector_base<algo_group_type>* selector,
-                         const std::string& str_to_parse,
+void fill_table_from_str(const std::string& str_to_parse,
                          ccl_selection_table_t<algo_group_type>& table) {
     std::string block;
     std::string algo_name_str;
@@ -66,6 +65,9 @@ void fill_table_from_str(ccl_algorithm_selector_base<algo_group_type>* selector,
 
     full_stream.str(str_to_parse);
     while (std::getline(full_stream, block, CCL_SELECTION_BLOCK_DELIMETER)) {
+        if (block.empty()) {
+            CCL_THROW("Empty block detected in string: ", str_to_parse);
+        }
         LOG_TRACE(block);
         block_stream.str(block);
         try {
@@ -88,13 +90,13 @@ void fill_table_from_str(ccl_algorithm_selector_base<algo_group_type>* selector,
 
         LOG_TRACE("block ", block, ", algo_name_str ", algo_name_str);
 
-        algo_group_type algo =
-            ccl_algorithm_selector_helper<algo_group_type>::algo_from_str(algo_name_str);
+        algo_group_type algo = ccl_coll_algorithm_from_str<algo_group_type>(algo_name_str);
 
         if (algo_name_str.length() == block.length()) {
             /* set the single algorithm for the whole range */
             table.clear();
-            selector->insert(table, 0, CCL_SELECTION_MAX_COLL_SIZE, algo);
+            ccl_algorithm_selector_base<algo_group_type>::insert(
+                table, 0, CCL_SELECTION_MAX_COLL_SIZE, algo);
         }
         else {
             try {
@@ -140,7 +142,8 @@ void fill_table_from_str(ccl_algorithm_selector_base<algo_group_type>* selector,
                              right_size,
                              ")");
 
-            selector->insert(table, left_size, right_size, algo);
+            ccl_algorithm_selector_base<algo_group_type>::insert(
+                table, left_size, right_size, algo);
         }
         block_stream.clear();
     }
@@ -157,8 +160,8 @@ void ccl_algorithm_selector_base<algo_group_type>::init() {
     algo_group_type elem_algo;
     ccl_selection_border_type elem_border;
 
-    fill_table_from_str<algo_group_type>(this, main_str_to_parse, main_table);
-    fill_table_from_str<algo_group_type>(this, scaleout_str_to_parse, scaleout_table);
+    fill_table_from_str<algo_group_type>(main_str_to_parse, main_table);
+    fill_table_from_str<algo_group_type>(scaleout_str_to_parse, scaleout_table);
 
     auto tables_to_check = std::vector<const ccl_selection_table_t<algo_group_type>*>{
         &main_table, &fallback_table, &scaleout_table
@@ -204,10 +207,6 @@ void ccl_algorithm_selector_base<algo_group_type>::init() {
 
 template <typename algo_group_type>
 void ccl_algorithm_selector_base<algo_group_type>::print() const {
-    size_t elem_size;
-    algo_group_type elem_algo;
-    ccl_selection_border_type elem_border;
-
     std::stringstream str;
     auto tables_to_print = std::vector<const ccl_selection_table_t<algo_group_type>*>{
         &main_table, &fallback_table, &scaleout_table
@@ -222,33 +221,66 @@ void ccl_algorithm_selector_base<algo_group_type>::print() const {
         table_name = (table == &scaleout_table) ? "scaleout table" : table_name;
 
         str << "  " << table_name << std::endl;
-
-        for (auto it = table->begin(); it != table->end(); ++it) {
-            const ccl_selection_table_t<algo_group_type>& table_ref = *table;
-            ccl_selection_unpack_elem(elem_size, elem_algo, elem_border, it, table_ref);
-
-            size_t left_size = 0, right_size = 0;
-            if (elem_border == ccl_selection_border_both) {
-                left_size = right_size = elem_size;
-            }
-            else if (elem_border == ccl_selection_border_left) {
-                left_size = elem_size;
-                it++;
-                ccl_selection_unpack_elem(elem_size, elem_algo, elem_border, it, table_ref);
-                CCL_THROW_IF_NOT(elem_border == ccl_selection_border_right);
-                right_size = elem_size;
-            }
-
-            str << "    ["
-                << ((left_size == CCL_SELECTION_MAX_COLL_SIZE) ? CCL_SELECTION_MAX_COLL_SIZE_STR
-                                                               : std::to_string(left_size))
-                << " - "
-                << ((right_size == CCL_SELECTION_MAX_COLL_SIZE) ? CCL_SELECTION_MAX_COLL_SIZE_STR
-                                                                : std::to_string(right_size))
-                << "]: " << ccl_coll_algorithm_to_str(elem_algo) << std::endl;
-        }
+        str << ccl_algorithm_selector_base<algo_group_type>::table_to_str(*table);
     }
     LOG_DEBUG(str.str());
+}
+
+template <typename algo_group_type>
+std::string ccl_algorithm_selector_base<algo_group_type>::table_to_str(
+    const ccl_selection_table_t<algo_group_type>& table) {
+    size_t elem_size;
+    algo_group_type elem_algo;
+    // elem_border represents which border the current is on.
+    // ccl_selection_border_left means the current element is on the left border,
+    // ccl_selection_border_right means the current element is on the right,
+    // while ccl_selection_border_both means the current element covers all sizes.
+    ccl_selection_border_type elem_border;
+
+    std::stringstream str;
+    for (auto it = table.begin(); it != table.end(); ++it) {
+        ccl_selection_unpack_elem(elem_size, elem_algo, elem_border, it, table);
+
+        size_t left_size = 0, right_size = 0;
+        if (elem_border == ccl_selection_border_both) {
+            left_size = right_size = elem_size;
+        }
+        else if (elem_border == ccl_selection_border_left) {
+            left_size = elem_size;
+            it++;
+            if (it == table.end()) {
+                CCL_THROW("missing right border");
+            }
+            ccl_selection_unpack_elem(elem_size, elem_algo, elem_border, it, table);
+            CCL_THROW_IF_NOT(elem_border == ccl_selection_border_right);
+            right_size = elem_size;
+        }
+
+        str << "    ["
+            << ((left_size == CCL_SELECTION_MAX_COLL_SIZE) ? CCL_SELECTION_MAX_COLL_SIZE_STR
+                                                           : std::to_string(left_size))
+            << " - "
+            << ((right_size == CCL_SELECTION_MAX_COLL_SIZE) ? CCL_SELECTION_MAX_COLL_SIZE_STR
+                                                            : std::to_string(right_size))
+            << "]: " << ccl_coll_algorithm_to_str(elem_algo) << std::endl;
+    }
+    return str.str();
+}
+
+// return algo in the table based on size in bytes
+template <typename algo_group_type>
+algo_group_type ccl_algorithm_selector_base<algo_group_type>::get_value_from_table(
+    size_t size,
+    const ccl_selection_table_t<algo_group_type>& table) {
+    auto lower_bound = table.lower_bound(size);
+    if (lower_bound == table.end()) {
+        CCL_THROW("Size ", size, " is out of range. Check table configuration.");
+    }
+    size_t elem_size;
+    algo_group_type elem_algo;
+    ccl_selection_border_type elem_border;
+    ccl_selection_unpack_elem(elem_size, elem_algo, elem_border, lower_bound, table);
+    return elem_algo;
 }
 
 template <typename algo_group_type>

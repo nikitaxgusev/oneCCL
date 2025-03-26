@@ -26,6 +26,7 @@ template <typename T, int NE, int NP>
 ccl::event reduce_scatter_small_impl(const void* send_buf,
                                      void* recv_buf,
                                      size_t recv_count,
+                                     size_t rem_count,
                                      ccl::datatype dtype,
                                      ccl::reduction reduction,
                                      ccl_comm* comm,
@@ -37,10 +38,15 @@ ccl::event reduce_scatter_small_impl(const void* send_buf,
     auto ccl_dtype = ccl::global_data::get().dtypes->get(dtype);
     const size_t dsize = ccl_dtype.size();
 
-    const size_t count = recv_count;
     std::shared_ptr<ccl_comm> node_comm = comm->get_node_comm();
     const int comm_size = node_comm->size();
     const int comm_rank = node_comm->rank();
+
+    const size_t count = recv_count;
+    // calculate the total count of data to be reduced and copied to tmp buffer,
+    // taking into the account possible remainder
+    const size_t reduce_count = comm_rank == comm_size - 1 ? recv_count + rem_count : recv_count;
+    const size_t copy_count = comm_size * recv_count + rem_count;
 
     size_t hw_threads = get_total_threads(q);
 
@@ -70,7 +76,16 @@ ccl::event reduce_scatter_small_impl(const void* send_buf,
     auto reduce_sum_invoke = [=, &q]<int VS, int SGS, int LB, int GB>(std::vector<sycl::event> l_dep_events) {
         constexpr int use_block = 1;
         constexpr int vec_size = VS, wg_size = SGS, sg_size = SGS;
-        const size_t kernel_threads = count / vec_size + count % vec_size;
+
+        size_t kernel_threads_cp = count / vec_size + count % vec_size;
+        size_t kernel_threads_rd = kernel_threads_cp;
+        if (rem_count != 0) {
+            constexpr int vec_size_cp = vec_size * N;
+            kernel_threads_cp = copy_count / vec_size_cp + copy_count % vec_size_cp;
+            kernel_threads_rd = reduce_count / vec_size + reduce_count % vec_size;
+        }
+        const size_t kernel_threads = std::max(kernel_threads_cp, kernel_threads_rd);
+
         const size_t kernel_size = ((kernel_threads + wg_size - 1) / wg_size) * wg_size;
 
         // total number of hw threads is a multiple of sub_group
@@ -93,26 +108,52 @@ ccl::event reduce_scatter_small_impl(const void* send_buf,
             remote_ptrs_offset[i] = (char*)remote_ptrs[i] + comm_rank * count * dsize;
         }
 
-        ccl_kernel_barrier_data kernel_barrier_data = get_kernel_barrier_data().inc_slot();
+        ccl_kernel_barrier_data kernel_barrier_data = get_kernel_barrier_data(comm).inc_slot();
         // if global barrier is not used, then do not increment the barrier counter
         ccl_comm_barrier_data comm_barrier_data = GB ? node_comm->barrier_inc() : node_comm->barrier_data();
 
-        sycl::event local_event = q.submit([=](sycl::handler& h) {
-            h.depends_on(l_dep_events);
-            h.parallel_for(
-                sycl::nd_range<1>(kernel_size, wg_size),
-                [=](sycl::nd_item<1> it) [[intel::reqd_sub_group_size(sg_size)]] {
-                    reduce_sum<T, N, VS, use_block, LB, GB, 1, N>(send_buf,
-                                                                  recv_buf,
-                                                                  local_tmp_buf,
-                                                                  remote_ptrs_offset,
-                                                                  remote_ptrs_offset,
-                                                                  kernel_barrier_data,
-                                                                  comm_barrier_data,
-                                                                  count,
-                                                                  it);
-                });
-        });
+        sycl::event local_event;
+        if (rem_count == 0) {
+            // general case, original specification of reduce-scatter
+            local_event = q.submit([=](sycl::handler& h) {
+                h.depends_on(l_dep_events);
+                h.parallel_for(
+                    sycl::nd_range<1>(kernel_size, wg_size),
+                    [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(sg_size)]] {
+                        reduce_sum<T, N, VS, use_block, LB, GB, 1, N>(send_buf,
+                                                                      recv_buf,
+                                                                      local_tmp_buf,
+                                                                      remote_ptrs_offset,
+                                                                      remote_ptrs_offset,
+                                                                      kernel_barrier_data,
+                                                                      comm_barrier_data,
+                                                                      count,
+                                                                      it);
+                    });
+            });
+        }
+        else {
+            // extended case, the last recv block can be bigger, holds the remainder
+            // TODO: if reduce_sum_general and reduce_sum delivers similar performance,
+            // we can merge conditions (MLSL-3401)
+            local_event = q.submit([=](sycl::handler& h) {
+                h.depends_on(l_dep_events);
+                h.parallel_for(
+                    sycl::nd_range<1>(kernel_size, wg_size),
+                    [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(sg_size)]] {
+                        reduce_sum_general<T, N, vec_size, use_block, LB, GB, 1, N>(send_buf,
+                                                                                    recv_buf,
+                                                                                    local_tmp_buf,
+                                                                                    remote_ptrs_offset,
+                                                                                    remote_ptrs_offset,
+                                                                                    kernel_barrier_data,
+                                                                                    comm_barrier_data,
+                                                                                    copy_count,
+                                                                                    reduce_count,
+                                                                                    it);
+                    });
+            });
+        }
         return local_event;
     };
 
@@ -121,7 +162,7 @@ ccl::event reduce_scatter_small_impl(const void* send_buf,
     auto memcpy_reduce_sum = [=, &q]<int VS>() {
         sycl::event memcpy_event = q.submit([=](sycl::handler& h) {
             h.depends_on(dep_events);
-            h.memcpy(local_tmp_buf, send_buf, dsize * count * comm_size);
+            h.memcpy(local_tmp_buf, send_buf, dsize * copy_count);
         });
 
         sycl::event barrier_event = invoke_barrier(node_comm, q, { memcpy_event }, use_cpu_barrier);
@@ -183,6 +224,16 @@ ccl::event reduce_scatter_small_impl(const void* send_buf,
     else {
         constexpr int vec_size = get_num_elements<T, 8>();
         kernel_event = memcpy_reduce_sum.template operator()<vec_size>();
+    }
+
+    // do the average reduction separately after sum
+    if (reduction == ccl::reduction::avg) {
+        // set dependencies
+        std::vector<sycl::event> avg_deps_evs;
+        avg_deps_evs.push_back(kernel_event);
+
+        LOG_DEBUG("reduce_scatter_small calculate average on counts: ", count, ", ranks: ", comm_size);
+        kernel_event = sycl_average(q, recv_buf, count, comm_size, dtype, avg_deps_evs);
     }
 
     return ccl::event::create_from_native(kernel_event);

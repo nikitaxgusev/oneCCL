@@ -118,6 +118,10 @@ communicator environment::create_communicator(const size_t size,
     return communicator::create_communicator(size, rank, kvs, attr);
 }
 
+communicator environment::split_communicator(const communicator& comm, int color, int key) const {
+    return communicator::split_communicator(comm, color, key);
+}
+
 } // namespace detail
 
 } // namespace ccl

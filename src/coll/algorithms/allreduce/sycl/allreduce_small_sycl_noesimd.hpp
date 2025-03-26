@@ -365,7 +365,7 @@ public:
                 e = queue.submit([&](sycl::handler &cgh) {
                     //                cgh.depends_on(memcpy_event);
                 cgh.parallel_for<class Allreduce_small_kernel_block<data_type>>(
-                    sycl::nd_range<1>( total_threads_dispatched, wg_size), [=](sycl::nd_item<1> idx2) [[intel::reqd_sub_group_size(subgroup_size)]] {
+                    sycl::nd_range<1>( total_threads_dispatched, wg_size), [=](sycl::nd_item<1> idx2) [[sycl::reqd_sub_group_size(subgroup_size)]] {
                     //                    sycl::nd_range<1>( total_threads_dispatched, wg_size), [=](sycl::nd_item<1> idx2) {
 
                     uint32_t idx = idx2.get_global_id();

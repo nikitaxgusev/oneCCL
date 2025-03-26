@@ -638,5 +638,5 @@ void list_manager::print_dump() const {
         ss << "}\n";
     }
 
-    logger.info(ss.str());
+    ccl_logger::get_instance().info(ss.str());
 }

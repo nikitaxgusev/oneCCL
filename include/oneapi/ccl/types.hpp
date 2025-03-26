@@ -43,6 +43,7 @@ enum class reduction : int {
     prod,
     min,
     max,
+    avg,
     custom,
 };
 

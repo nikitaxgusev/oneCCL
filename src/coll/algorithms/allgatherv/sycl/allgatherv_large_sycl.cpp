@@ -19,11 +19,15 @@ ccl::event allgatherv_large(const void* send_buf,
                             size_t send_count,
                             void* recv_buf,
                             const ccl::vector_class<size_t>& recv_counts,
+                            const ccl::vector_class<size_t>& offsets,
                             ccl::datatype dtype,
                             ccl_comm* comm,
                             ccl_stream* global_stream,
-                            const ccl::vector_class<ccl::event>& deps) {
+                            const ccl::vector_class<ccl::event>& deps,
+                            bool wait_on_deps) {
     LOG_DEBUG("invoking allgatherv_large");
+
+    sycl_ptrs_type sycl_ptrs;
 
     std::shared_ptr<ccl_comm> pair_comm = comm->get_pair_comm();
     std::shared_ptr<ccl_comm> even_comm = comm->get_even_comm();
@@ -58,23 +62,32 @@ ccl::event allgatherv_large(const void* send_buf,
 
     // if tmp buffer is not used, perform ipc exchange on send and recv buffer
     if (!is_tmp_used) {
+        // synchronize SYCL host tasks, which can contain MPI calls,
+        // with an MPI call (allgather) in ipc exchange
+        if (wait_on_deps) {
+            std::vector<sycl::event> dep_events = get_sycl_events(deps);
+            for (auto& dep : dep_events) {
+                dep.wait();
+            }
+        }
         std::vector<void*> ptrs{ (void*)send_buf, recv_buf }; // index 0 and 1
         auto [sched, exchange_entry] = do_ipc_exchange(comm, global_stream, ptrs);
 
-        xelink_ptrs_rd = get_ipc_ptrs<void, MAX_GPUS>(even_comm, 0, (void*)send_buf, sched);
-        xelink_ptrs_wr = get_ipc_ptrs<void, MAX_GPUS>(even_comm, 1, recv_buf, sched);
+        sycl_ptrs.xelink_ptrs_rd = get_ipc_ptrs<void, MAX_GPUS>(even_comm, 0, (void*)send_buf, sched);
+        sycl_ptrs.xelink_ptrs_wr = get_ipc_ptrs<void, MAX_GPUS>(even_comm, 1, recv_buf, sched);
         // use full vector (>= 8 bytes) if remote buffers and data size are 4 byte aligned
         use_full_vector = use_full_vector &&
-                          all_aligned(xelink_ptrs_rd.data(), even_comm->size(), send_count * dsize, 4) &&
-                          all_aligned(xelink_ptrs_wr.data(), even_comm->size(), send_count * dsize, 4);
+                          all_aligned(sycl_ptrs.xelink_ptrs_rd.data(), even_comm->size(), send_count * dsize, 4) &&
+                          all_aligned(sycl_ptrs.xelink_ptrs_wr.data(), even_comm->size(), send_count * dsize, 4);
 
         if (pair_comm->size() > 1) {
             assert(pair_comm->size() == MAX_TILES);
             int peer_pair_rank = pair_comm->rank() ? 0 : 1;
-            mdfi_ptr_rd = get_ipc_ptrs<void, MAX_TILES>(pair_comm, 0, (void*)send_buf, sched)[peer_pair_rank];
-            mdfi_ptr_wr = get_ipc_ptrs<void, MAX_TILES>(pair_comm, 1, recv_buf, sched)[peer_pair_rank];
-            use_full_vector = use_full_vector && all_aligned(&mdfi_ptr_rd, 1, send_count * dsize, 4) &&
-                              all_aligned(&mdfi_ptr_wr, 1, send_count * dsize, 4);
+            sycl_ptrs.mdfi_ptr_rd =
+                get_ipc_ptrs<void, MAX_TILES>(pair_comm, 0, (void*)send_buf, sched)[peer_pair_rank];
+            sycl_ptrs.mdfi_ptr_wr = get_ipc_ptrs<void, MAX_TILES>(pair_comm, 1, recv_buf, sched)[peer_pair_rank];
+            use_full_vector = use_full_vector && all_aligned(&sycl_ptrs.mdfi_ptr_rd, 1, send_count * dsize, 4) &&
+                              all_aligned(&sycl_ptrs.mdfi_ptr_wr, 1, send_count * dsize, 4);
         }
         delete exchange_entry;
         delete sched;
@@ -83,22 +96,22 @@ ccl::event allgatherv_large(const void* send_buf,
     }
     else {
         coll_init(comm, global_stream);
-        xelink_ptrs_rd = get_remote_even_tmp_buf(0);
+        sycl_ptrs.xelink_ptrs_rd = get_remote_even_tmp_buf(0, comm);
         if (pair_comm->size() > 1) {
             assert(pair_comm->size() == MAX_TILES);
             int peer_pair_rank = pair_comm->rank() ? 0 : 1;
-            mdfi_ptr_wr = get_remote_pair_tmp_buf(0)[peer_pair_rank];
+            sycl_ptrs.mdfi_ptr_wr = get_remote_pair_tmp_buf(0, comm)[peer_pair_rank];
         }
     }
 
     auto lambda = [&]<typename T, int NE, int NP>() {
         if (use_full_vector) {
             return allgatherv_large_impl<T, NE, NP, true>(
-                send_buf, send_count, recv_buf, recv_counts, dtype, comm, global_stream, deps);
+                send_buf, send_count, recv_buf, recv_counts, offsets, dtype, comm, global_stream, sycl_ptrs, deps);
         }
         else {
             return allgatherv_large_impl<T, NE, NP, false>(
-                send_buf, send_count, recv_buf, recv_counts, dtype, comm, global_stream, deps);
+                send_buf, send_count, recv_buf, recv_counts, offsets, dtype, comm, global_stream, sycl_ptrs, deps);
         }
     };
 

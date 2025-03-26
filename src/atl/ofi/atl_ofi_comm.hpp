@@ -173,6 +173,10 @@ public:
 
     std::shared_ptr<atl_base_comm> comm_split(int color, int key) override;
 
+    int get_mpi_comm() override {
+        return 0;
+    }
+
 private:
     friend atl_comm_manager;
 

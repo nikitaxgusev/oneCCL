@@ -36,13 +36,17 @@
 
 bool can_use_internal_kvs() {
     return ccl::global_data::env().kvs_init_mode == ccl::kvs_mode::pmi ||
-           ccl::global_data::env().atl_transport == ccl_atl_ofi;
+           (ccl::global_data::env().atl_transport == ccl_atl_ofi &&
+            (ccl::global_data::env().kvs_init_mode != ccl::kvs_mode::pmix_ofi ||
+             ccl::global_data::env().kvs_init_mode != ccl::kvs_mode::pmix_ofi_shm) &&
+            ccl::global_data::env().process_launcher != process_launcher_mode::pmix);
 }
 
 #define assert_throw_can_use_internal_kvs() \
     do { \
-        CCL_THROW_IF_NOT(can_use_internal_kvs(), \
-                         "internal kvs should be used with pmi kvs mode or ofi transport"); \
+        CCL_THROW_IF_NOT( \
+            can_use_internal_kvs(), \
+            "internal kvs should be used with pmi kvs mode or ofi transport with pmi kvs mode and pmix launcher"); \
     } while (0)
 
 internal_kvs::internal_kvs() : CONNECTION_TIMEOUT(ccl::global_data::env().kvs_connection_timeout) {}

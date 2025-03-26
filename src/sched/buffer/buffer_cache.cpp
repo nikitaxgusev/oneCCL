@@ -18,9 +18,6 @@
 
 namespace ccl {
 
-#if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE)
-#endif // CCL_ENABLE_SYCL && CCL_ENABLE_ZE
-
 buffer_cache::buffer_cache(size_t instance_count)
         : reg_buffers(instance_count)
 #ifdef CCL_ENABLE_SYCL
@@ -28,14 +25,6 @@ buffer_cache::buffer_cache(size_t instance_count)
           sycl_buffers(instance_count)
 #endif // CCL_ENABLE_SYCL
 {
-#if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE)
-    // Instruct the UMD to create the internal graphics allocation for each system memory allocation
-    // against a driver handle, instead of a command list handle.
-    // By doing this, the UMD is able to reuse the internal graphics allocation for any new or reset list,
-    // until the application decides to release the imported pointer. Any GPU driver handle fits.
-    // This API is a part of exported extensions, therefore have to check for availability first.
-    // Note: ze_data may be not initialized in some cases like stub backend mode or CCL_ZE_ENABLE=0
-#endif // CCL_ENABLE_SYCL && CCL_ENABLE_ZE
 }
 
 buffer_cache::~buffer_cache() {
@@ -98,7 +87,8 @@ void regular_buffer_cache::get(size_t bytes, void** pptr) {
     }
     *pptr = CCL_MALLOC(bytes, "buffer");
 #if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE)
-    if (global_data::get().ze_data->external_pointer_registration_enabled &&
+    if (global_data::get().ze_data &&
+        global_data::get().ze_data->external_pointer_registration_enabled &&
         bytes < global_data::env().ze_pointer_registration_threshold) {
         global_data::get().ze_data->import_external_pointer(*pptr, bytes);
     }
@@ -114,7 +104,8 @@ void regular_buffer_cache::push(size_t bytes, void* ptr) {
         return;
     }
 #if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE)
-    if (global_data::get().ze_data->external_pointer_registration_enabled &&
+    if (global_data::get().ze_data &&
+        global_data::get().ze_data->external_pointer_registration_enabled &&
         bytes < global_data::env().ze_pointer_registration_threshold) {
         global_data::get().ze_data->release_imported_pointer(ptr);
     }

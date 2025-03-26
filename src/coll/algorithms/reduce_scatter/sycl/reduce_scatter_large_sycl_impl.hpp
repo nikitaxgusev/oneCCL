@@ -65,11 +65,125 @@ void inline read_reduce_write(std::array<void *, MAX_GPUS> pair_ptrs,
     }
 }
 
+template <typename T, int N, int vec_size>
+sycl::event reduce_scatter_large_read_invoke(std::array<void *, MAX_NODE_RANKS> send_bufs,
+                                             void *recv_buf,
+                                             size_t count,
+                                             ccl::reduction reduction,
+                                             std::shared_ptr<ccl_comm> comm,
+                                             sycl::queue &q,
+                                             std::vector<sycl::event> deps,
+                                             size_t offset = 0) {
+    std::array<void *, MAX_NODE_RANKS> src_ptrs;
+    for (int i = 0; i < N; i++) {
+        src_ptrs[i] = (char *)send_bufs[i] + offset;
+    }
+    void *recv_ptr = (char *)recv_buf + offset;
+    sycl::event work_event = q.submit([=](sycl::handler &h) {
+        h.depends_on(deps);
+        const int work_group_size = 16;
+        const int sub_group_size = 16;
+        ccl_kernel_barrier_data dummy_kbd;
+        ccl_comm_barrier_data dummy_cbd = comm->barrier_data();
+        const size_t kernel_threads = count / vec_size + count % vec_size;
+        const size_t kernel_size = ((kernel_threads + work_group_size - 1) / work_group_size) * work_group_size;
+        h.parallel_for(
+            sycl::nd_range<1>(kernel_size, work_group_size),
+            [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(sub_group_size)]] {
+                reduce_sum<T, N, vec_size, 1, 0, 0>(
+                    nullptr, recv_ptr, nullptr, src_ptrs, src_ptrs, dummy_kbd, dummy_cbd, count, it);
+            });
+    });
+    return work_event;
+}
+
+// find how much offset the pointers have with alignment
+// returns the offset if all pointers have same offset or else returns 0
+inline size_t get_alignment_offset(std::array<void *, MAX_NODE_RANKS> ptrs, int N, int alignment) {
+    const size_t align_offset = reinterpret_cast<uintptr_t>(ptrs[0]) % alignment;
+    for (int i = 1; i < N; i++) {
+        if (reinterpret_cast<uintptr_t>(ptrs[i]) % alignment != align_offset) {
+            return 0;
+        }
+    }
+    return align_offset;
+}
+
+template <typename T, int N, int vec_size>
+ccl::event reduce_scatter_large_read_ipc(const void *send_buf,
+                                         void *recv_buf,
+                                         size_t recv_count,
+                                         ccl::datatype dtype,
+                                         ccl::reduction reduction,
+                                         ccl_comm *comm,
+                                         ccl_stream *global_stream,
+                                         sycl_ptrs_type &sycl_ptrs,
+                                         const ccl::vector_class<ccl::event> &deps) {
+    auto ccl_dtype = ccl::global_data::get().dtypes->get(dtype);
+    const int dsize = ccl_dtype.size();
+    sycl::queue q = global_stream->get_native_stream();
+    const bool is_cpu_barrier = ccl::global_data::env().sycl_ccl_barrier;
+    std::shared_ptr<ccl_comm> node_comm = comm->get_node_comm();
+    const int node_comm_size = node_comm->size();
+    CCL_THROW_IF_NOT(node_comm->size() == N,
+                     "SYCL reduce_scatter read algo is only implemented for single GPU case");
+
+    const int rank = node_comm->rank();
+    const size_t offset_rank = rank * recv_count * dsize;
+    std::array<void *, MAX_NODE_RANKS> src_ptrs;
+    std::vector<sycl::event> dep_events = get_sycl_events(deps);
+    sycl::event barrier_event, dep_event, work_event;
+    for (int idx = 0; idx < N; idx++) {
+        if (idx == rank) {
+            src_ptrs[idx] = (char *)send_buf + offset_rank;
+        }
+        else {
+            src_ptrs[idx] = (char *)sycl_ptrs.mdfi_ptr_rd + offset_rank;
+        }
+    }
+
+    // currently peeling is supported if all ranks has same alignment offset
+    const size_t align_offset = get_alignment_offset(src_ptrs, N, ccl::global_data::env().sycl_kernels_line_size);
+    size_t offset_byte = 0, offset_count = 0;
+    if (align_offset != 0) {
+        offset_byte = ccl::utils::get_aligned_offset_byte(
+            src_ptrs[0], recv_count * dsize, ccl::global_data::env().sycl_kernels_line_size);
+        offset_count = offset_byte / dsize;
+    }
+
+    barrier_event = invoke_barrier(node_comm, q, dep_events, is_cpu_barrier);
+
+    // perform kernel on the peeled first unaligned small chunk
+    if (offset_byte != 0) {
+        dep_event = reduce_scatter_large_read_invoke<T, N, 1>(
+            src_ptrs, recv_buf, offset_count, reduction, node_comm, q, { barrier_event });
+    }
+    else {
+        dep_event = barrier_event;
+    }
+
+    // perform kernel on the aligned large chunk
+    work_event = reduce_scatter_large_read_invoke<T, N, vec_size>(
+        src_ptrs, recv_buf, recv_count - offset_count, reduction, node_comm, q, { dep_event }, offset_byte);
+
+    // do the average reduction separately after sum
+    if (reduction == ccl::reduction::avg) {
+        // set dependencies
+        std::vector<sycl::event> avg_deps_evs;
+        avg_deps_evs.push_back(work_event);
+
+        LOG_DEBUG("reduce_scatter_large_read_ipc calculate average on counts: ",
+                  recv_count,
+                  ", ranks: ",
+                  node_comm_size);
+        work_event = sycl_average(q, recv_buf, recv_count, node_comm_size, dtype, avg_deps_evs);
+    }
+
+    return ccl::event::create_from_native(work_event);
+}
+
 //TODO : currently full vector size (8 bytes) is not used for non 4 byte aligned data,
-// instead we copy data to a tmp buffer and also use 4 byte vectors in reduce kernel.
-// for non-inplace : we can copy data to a tmp_buffer and use 8 byte vectors for reduce kernel.
-// for inplace : we cannot use 8 byte vectors in reduce kernel and therefore it may be better
-//               to remove the copy to tmp buffer and use 4 byte vectors everywhere.
+// check whether we can copy data to a tmp_buffer and use 8 byte vectors for reduce kernel.
 
 // NE is the number of ranks in even_comm and
 // NP is the number of ranks in pair_comm
@@ -81,6 +195,7 @@ ccl::event reduce_scatter_large_impl(const void *send_buf,
                                      ccl::reduction reduction,
                                      ccl_comm *comm,
                                      ccl_stream *global_stream,
+                                     sycl_ptrs_type &sycl_ptrs,
                                      const ccl::vector_class<ccl::event> &deps) {
     constexpr int N = NE;
     auto ccl_dtype = ccl::global_data::get().dtypes->get(dtype);
@@ -94,10 +209,13 @@ ccl::event reduce_scatter_large_impl(const void *send_buf,
 
     const int pair_comm_size = pair_comm->size();
     const int even_comm_size = even_comm->size();
+    const int node_comm_size = node_comm->size();
 
     constexpr int pipeline_size = 2;
 
     const bool is_multi_tile = pair_comm_size > 1;
+    const bool is_multi_gpu = even_comm_size > 1;
+    const bool is_single_gpu = even_comm_size == 1;
 
     // TODO : generalize constraints for different hardware.
     // kernels with remote access is best performant at 64 bytes alignment (sycl_kernels_line_size/2) on PVC
@@ -106,8 +224,17 @@ ccl::event reduce_scatter_large_impl(const void *send_buf,
     // use tmp buf for types < 4 byte size with odd count or non 4 byte aligned data
     // use tmp buf when data count bytes is not 64 byte aligned
     // since tmp buf version performs better in that case
-    const bool is_tmp_used = ccl::global_data::env().sycl_reduce_scatter_tmp_buf ||
-                             ((!use_full_vector || !is_aligned) && ccl::global_data::env().sycl_auto_use_tmp_buf);
+    bool is_tmp_used = ccl::global_data::env().sycl_reduce_scatter_tmp_buf ||
+                       ((!use_full_vector || !is_aligned) && ccl::global_data::env().sycl_auto_use_tmp_buf);
+    if (is_single_gpu) {
+        is_tmp_used = ccl::global_data::env().sycl_reduce_scatter_tmp_buf;
+    }
+
+    if (is_single_gpu && !is_tmp_used) {
+        constexpr int vec_size = get_num_elements<T, 8, use_full_vector>();
+        return reduce_scatter_large_read_ipc<T, NP, vec_size>(
+            send_buf, recv_buf, recv_count, dtype, reduction, comm, global_stream, sycl_ptrs, deps);
+    }
 
     const bool is_cpu_barrier = ccl::global_data::env().sycl_ccl_barrier;
 
@@ -123,10 +250,10 @@ ccl::event reduce_scatter_large_impl(const void *send_buf,
 
     // 0 index is used for tmp work buffer and
     // 1 index is used to copy input data
-    void *work_buf = get_tmp_buf(0);
+    void *work_buf = get_tmp_buf(0, comm);
     std::array<void *, MAX_GPUS> work_bufs[pipeline_size];
     std::array<void *, MAX_GPUS> xelink_work_bufs[pipeline_size];
-    xelink_work_bufs[0] = get_remote_even_tmp_buf(0);
+    xelink_work_bufs[0] = get_remote_even_tmp_buf(0, comm);
     const size_t pipeline_offset = chunk_size * even_comm_size;
     for (int i = 0; i < even_comm_size; i++) {
         work_bufs[0][i] = (char *)work_buf + chunk_size * i;
@@ -136,7 +263,7 @@ ccl::event reduce_scatter_large_impl(const void *send_buf,
     }
 
     void *tmp_bufs[pipeline_size];
-    tmp_bufs[0] = get_tmp_buf(1);
+    tmp_bufs[0] = get_tmp_buf(1, comm);
     tmp_bufs[1] = (char *)(tmp_bufs[0]) + pipeline_offset;
 
     std::vector<sycl::event> dep_events = get_sycl_events(deps);
@@ -172,15 +299,16 @@ ccl::event reduce_scatter_large_impl(const void *send_buf,
             l_cp_src_ptrs_next[i] = (char *)l_cp_src_ptrs[i] + chunk_size;
             l_cp_dst_ptrs_next[i] = (char *)tmp_bufs[pipeline_index_next] + offset_tmp;
 
-            l_mdfi_send_ptrs[i] = (char *)mdfi_ptr_rd + (is_tmp_used ? mdfi_offset_tmp : offset);
+            l_mdfi_send_ptrs[i] = (char *)sycl_ptrs.mdfi_ptr_rd + (is_tmp_used ? mdfi_offset_tmp : offset);
             l_send_ptrs[i] = (char *)send_buf + offset;
-            l_xelink_work_ptrs[i] = (char *)xelink_work_bufs[pipeline_index][i];
+            // for single gpu, we dont need to write to a tmp buffer and reduce,
+            // instead we can directly write to the recv buffer
+            l_xelink_work_ptrs[i] =
+                is_multi_gpu ? (char *)xelink_work_bufs[pipeline_index][i] : (char *)recv_buf + chunk_offset;
 
             l_work_ptrs[i] = (char *)work_bufs[pipeline_index][i];
         }
         l_recv_ptr = (char *)recv_buf + chunk_offset;
-
-        constexpr bool subgroup_api = false;
 
         // for 2 byte types with odd count or non 4 byte aligned data, use 4 byte vectors instead of 8 bytes
         constexpr int vec_size = get_num_elements<T, 8, use_full_vector>();
@@ -204,8 +332,8 @@ ccl::event reduce_scatter_large_impl(const void *send_buf,
 
                 h.parallel_for(
                     sycl::nd_range<1>(kernel_size, work_group_size_cp),
-                    [=](sycl::nd_item<1> it) [[intel::reqd_sub_group_size(sub_group_size_cp)]] {
-                        copy_data<T, N, vec_size_cp, subgroup_api>(l_cp_dst_ptrs, l_cp_src_ptrs, data_count, it);
+                    [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(sub_group_size_cp)]] {
+                        copy_data<T, N, vec_size_cp>(l_cp_dst_ptrs, l_cp_src_ptrs, data_count, it);
                     });
             });
         }
@@ -239,11 +367,11 @@ ccl::event reduce_scatter_large_impl(const void *send_buf,
 
             h.parallel_for(
                 sycl::nd_range<1>(kernel_size, work_group_size),
-                [=](sycl::nd_item<1> it) [[intel::reqd_sub_group_size(sub_group_size)]] {
+                [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(sub_group_size)]] {
                     read_reduce_write<T, N, vec_size>(
                         l_mdfi_send_ptrs, l_send_ptrs, l_xelink_work_ptrs, is_multi_tile, data_count, it);
 
-                    if (nc > 0) {
+                    if (nc > 0 && is_multi_gpu) {
                         reduce_sum<T, N, vec_size, 1, 0, 0>(nullptr,
                                                             l_recv_ptr_prev,
                                                             nullptr,
@@ -256,8 +384,7 @@ ccl::event reduce_scatter_large_impl(const void *send_buf,
                     }
 
                     if (is_tmp_used && nc < num_chunks - 1 && is_multi_tile) {
-                        copy_data<T, N, vec_size, subgroup_api>(
-                            l_cp_dst_ptrs_next, l_cp_src_ptrs_next, data_count_next, it);
+                        copy_data<T, N, vec_size>(l_cp_dst_ptrs_next, l_cp_src_ptrs_next, data_count_next, it);
                     }
                 });
         });
@@ -270,7 +397,7 @@ ccl::event reduce_scatter_large_impl(const void *send_buf,
 
         // pipeline epilogue
         // this reduction can also be done from the main kernel as last step with a guard of nc == num_chunks - 1
-        if (nc == num_chunks - 1) {
+        if (nc == num_chunks - 1 && is_multi_gpu) {
             work_event = invoke_barrier(node_comm, q_use, { work_event }, is_cpu_barrier);
 
             const size_t kernel_threads = data_count / vec_size + data_count % vec_size;
@@ -285,7 +412,7 @@ ccl::event reduce_scatter_large_impl(const void *send_buf,
 
                 h.parallel_for(
                     sycl::nd_range<1>(kernel_size, work_group_size),
-                    [=](sycl::nd_item<1> it) [[intel::reqd_sub_group_size(sub_group_size)]] {
+                    [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(sub_group_size)]] {
                         reduce_sum<T, N, vec_size, 1, 0, 0>(nullptr,
                                                             l_recv_ptr,
                                                             nullptr,
@@ -298,6 +425,16 @@ ccl::event reduce_scatter_large_impl(const void *send_buf,
                     });
             });
         }
+    }
+
+    // do the average reduction separately after sum
+    if (reduction == ccl::reduction::avg) {
+        // set dependencies
+        std::vector<sycl::event> avg_deps_evs;
+        avg_deps_evs.push_back(work_event);
+
+        LOG_DEBUG("reduce_scatter_large calculate average on counts: ", recv_count, ", ranks: ", node_comm_size);
+        work_event = sycl_average(q, recv_buf, recv_count, node_comm_size, dtype, avg_deps_evs);
     }
 
     return ccl::event::create_from_native(work_event);

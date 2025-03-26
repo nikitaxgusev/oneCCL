@@ -153,6 +153,31 @@ Arguments<br />
 By-default: &quot;1&quot; 
         
 
+## CCL_ENABLE_OMP_ALLREDUCE
+
+
+Set this environment variable to use openmp threads for synchronous collectives with direct algorithms on host buffers. 
+        
+
+
+Syntax <br />
+CCL_ENABLE_OMP_ALLREDUCE=&quot;&lt;value&gt;&quot;<br />
+<br />
+Arguments<br />
+&quot;&lt;value&gt;&quot; Description<br />
+
+ - 0 Does not use openmp threads for allreduce.<br />
+
+
+ - 1 Use openmp threads for allreduce (default).<br />
+<br />
+
+
+
+
+By-default: &quot;1&quot; 
+        
+
 ## CCL_ALLGATHER
 
 
@@ -972,6 +997,27 @@ This enviroment variable enables or disables the oversubscription throw check
 By-default: &quot;1&quot; 
         
 
+## CCL_SYCL_ALLTOALL_PROTOCOL
+
+
+Set this environment variable to select read or write based device-to-device data copy for the alltoall collective using device (GPU) buffers. 
+        
+
+
+Syntax CCL_SYCL_ALLTOALL_PROTOCOL=&quot;&lt;value&gt;&quot;
+Arguments
+&quot;&lt;value&gt;&quot; Description
+ - read Uses read based copy to transfer data across GPUs for the alltoall collective.
+
+ - write Uses write based copy to transfer data across GPUs for the alltoall collective (default).
+
+
+
+Description
+Set this environment variable to select read or write based device-to-device data copy for the alltoall collective using device (GPU) buffers.
+By-default: &quot;write&quot; 
+        
+
 ## CCL_DRMFD_DEV_RENDER_DIR_PATH
 
 
@@ -1151,12 +1197,12 @@ Set the threshold in bytes to specify the medium size algorithm in the allgather
 ## CCL_SYCL_ALLGATHERV_SCALEOUT_THRESHOLD
 
 
-Specify the threshold for the scaleout algorithm in allgatherv.
+Specify the threshold for the scaleout algorithm in allgatherv. 
+        
 
 
-
-Set the threshold in bytes to specify the max message size for the sycl scaleout phase of the allgatherv collective. Default value is 1048576. 
-
+Set the threshold in bytes to specify the scaleout algorithm in the allgatherv collective. Default value is 1048576. &quot;&lt;value&gt;&quot;&quot; : &quot;&gt;=0&quot; 
+        
 
 ## CCL_SYCL_ALLREDUCE_TMP_BUF
 

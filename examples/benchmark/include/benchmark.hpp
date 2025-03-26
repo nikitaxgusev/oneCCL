@@ -42,7 +42,7 @@
 #include "bf16.hpp"
 #include "coll.hpp"
 
-/* free letters: k v z */
+/* free letters: k */
 void print_help_usage(const char* app) {
     PRINT("\nUSAGE:\n"
           "\t%s [OPTIONS]\n\n"
@@ -55,6 +55,7 @@ void print_help_usage(const char* app) {
           "\t[-f,--min_elem_count <minimum number of elements for single collective>]: %d\n"
           "\t[-t,--max_elem_count <maximum number of elements for single collective>]: %d\n"
           "\t[-y,--elem_counts <list of element counts for single collective>]: [%d-%d]\n"
+          "\t[-z,--elem_offset <number of elements to offset buffers>]: %d\n"
           "\t[-c,--check <check result correctness>]: %s\n"
           "\t[-p,--cache <use persistent operations>]: %d\n"
           "\t[-q,--inplace <use same buffer as send and recv buffer>]: %d\n"
@@ -72,6 +73,7 @@ void print_help_usage(const char* app) {
           "\t[-d,--dtype <datatypes list/all>]: %s\n"
           "\t[-r,--reduction <reductions list/all>]: %s\n"
           "\t[-o,--csv_filepath <file to store CSV-formatted data into>]: %s\n"
+          "\t[-v,--verbosity <show verbose timing information with level>]: %d\n"
           "\t[-x,--ext <show additional information>]: %s\n"
           "\t[-h,--help]\n\n"
           "example:\n\t--coll allgatherv,allreduce --backend host --elem_counts 64,1024\n",
@@ -85,6 +87,7 @@ void print_help_usage(const char* app) {
           DEFAULT_MAX_ELEM_COUNT,
           DEFAULT_MIN_ELEM_COUNT,
           DEFAULT_MAX_ELEM_COUNT,
+          DEFAULT_ELEM_OFFSET,
           check_values_names[DEFAULT_CHECK_VALUES].c_str(),
           DEFAULT_CACHE_OPS,
           DEFAULT_INPLACE,
@@ -102,6 +105,7 @@ void print_help_usage(const char* app) {
           DEFAULT_DTYPES_LIST,
           DEFAULT_REDUCTIONS_LIST,
           DEFAULT_CSV_FILEPATH,
+          DEFAULT_VERBOSITY,
           ext_values_names[DEFAULT_EXT_VALUES].c_str());
 }
 
@@ -557,7 +561,7 @@ int parse_user_options(int& argc, char**(&argv), user_options_t& options) {
 
     char short_options[1024] = { 0 };
 
-    const char* base_options = "b:i:w:j:n:f:t:c:p:q:o:s:l:d:r:y:x:h";
+    const char* base_options = "b:i:w:j:n:f:t:c:p:q:o:s:l:d:r:z:y:v:x:h";
     memcpy(short_options, base_options, strlen(base_options));
 
 #ifdef CCL_ENABLE_NUMA
@@ -579,6 +583,7 @@ int parse_user_options(int& argc, char**(&argv), user_options_t& options) {
         { "min_elem_count", required_argument, nullptr, 'f' },
         { "max_elem_count", required_argument, nullptr, 't' },
         { "elem_counts", required_argument, nullptr, 'y' },
+        { "elem_offset", required_argument, nullptr, 'z' },
         { "check", required_argument, nullptr, 'c' },
         { "cache", required_argument, nullptr, 'p' },
         { "inplace", required_argument, nullptr, 'q' },
@@ -596,6 +601,7 @@ int parse_user_options(int& argc, char**(&argv), user_options_t& options) {
         { "dtype", required_argument, nullptr, 'd' },
         { "reduction", required_argument, nullptr, 'r' },
         { "csv_filepath", required_argument, nullptr, 'o' },
+        { "verbosity", required_argument, nullptr, 'v' },
         { "ext", required_argument, nullptr, 'x' },
         { "help", no_argument, nullptr, 'h' },
         { nullptr, 0, nullptr, 0 } // required at end of array.
@@ -663,14 +669,33 @@ int parse_user_options(int& argc, char**(&argv), user_options_t& options) {
                 else
                     errors++;
                 break;
+            case 'z':
+                if (is_valid_integer_option(optarg)) {
+                    options.elem_offset = atoll(optarg);
+                }
+                else
+                    errors++;
+                break;
             case 'c':
                 if (set_check_values(optarg, options.check_values)) {
                     PRINT("failed to parse 'check' option");
                     errors++;
                 }
                 break;
-            case 'p': options.cache_ops = atoi(optarg); break;
-            case 'q': options.inplace = atoi(optarg); break;
+            case 'p':
+                if (is_valid_integer_option(optarg)) {
+                    options.cache_ops = atoi(optarg);
+                }
+                else
+                    errors++;
+                break;
+            case 'q':
+                if (is_valid_integer_option(optarg)) {
+                    options.inplace = atoi(optarg);
+                }
+                else
+                    errors++;
+                break;
             case 's':
                 if (is_valid_integer_option(optarg)) {
                     options.numa_node = atoll(optarg);
@@ -685,7 +710,13 @@ int parse_user_options(int& argc, char**(&argv), user_options_t& options) {
                     errors++;
                 }
                 break;
-            case 'g': options.sycl_root_dev = atoi(optarg); break;
+            case 'g':
+                if (is_valid_integer_option(optarg)) {
+                    options.sycl_root_dev = atoi(optarg);
+                }
+                else
+                    errors++;
+                break;
             case 'm':
                 if (set_sycl_mem_type(optarg, options.sycl_mem_type)) {
                     PRINT("failed to parse 'sycl_mem_type' option");
@@ -723,6 +754,13 @@ int parse_user_options(int& argc, char**(&argv), user_options_t& options) {
                 should_parse_reductions = true;
                 break;
             case 'o': options.csv_filepath = std::string(optarg); break;
+            case 'v':
+                if (is_valid_integer_option(optarg)) {
+                    options.verbosity = atoi(optarg);
+                }
+                else
+                    errors++;
+                break;
             case 'x':
                 if (set_ext_info(optarg, options.show_additional_info)) {
                     PRINT("failed to parse 'ext' option");
@@ -847,9 +885,11 @@ void print_user_options(const user_options_t& options, const ccl::communicator& 
                   "\n  min_elem_count:  %zu"
                   "\n  max_elem_count:  %zu"
                   "\n  elem_counts:     %s"
+                  "\n  elem_offset:     %zu"
                   "\n  check:           %s"
                   "\n  cache:           %d"
                   "\n  inplace:         %d"
+                  "\n  verbosity:       %d"
 #ifdef CCL_ENABLE_NUMA
                   "\n  numa_node:       %s"
 #endif // CCL_ENABLE_NUMA
@@ -874,9 +914,11 @@ void print_user_options(const user_options_t& options, const ccl::communicator& 
                   options.min_elem_count,
                   options.max_elem_count,
                   elem_counts_str.c_str(),
+                  options.elem_offset,
                   check_values_str.c_str(),
                   options.cache_ops,
                   options.inplace,
+                  options.verbosity,
 #ifdef CCL_ENABLE_NUMA
                   (options.numa_node == DEFAULT_NUMA_NODE)
                       ? DEFAULT_NUMA_NODE_STR

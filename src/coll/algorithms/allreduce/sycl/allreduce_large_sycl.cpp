@@ -97,8 +97,17 @@ ccl::event allreduce_large(const void *send_buf,
                            ccl_comm *comm,
                            ccl_stream *global_stream,
                            const ccl::vector_class<ccl::event> &deps) {
-    LOG_DEBUG("invoking allreduce_large");
+    if (comm->is_multi_thread_instance() == true) {
+        LOG_DEBUG("invoking MT allreduce_large");
+        ccl::global_data::env().sycl_allreduce_tmp_buf = 1;
+        CCL_THROW_IF_NOT(ccl::global_data::env().sycl_allreduce_tmp_buf == 1,
+                         "MT large kernel doesnt support disabled tmp buf");
+    }
+    else {
+        LOG_DEBUG("invoking allreduce_large");
+    }
 
+    sycl_ptrs_type sycl_ptrs;
     std::shared_ptr<ccl_comm> pair_comm = comm->get_pair_comm();
     std::shared_ptr<ccl_comm> even_comm = comm->get_even_comm();
 
@@ -123,24 +132,28 @@ ccl::event allreduce_large(const void *send_buf,
 
     if (!is_use_tmp) {
         std::vector<void *> ptrs{ (void *)send_buf, recv_buf }; // index 0 and 1
+        // UMF: umf doesn't support user's allocation through the sycl yet.
+        //      Once it is supported, we can use  UMF as exchnage mechanism for allreduce_large
         auto [sched, exchange_entry] = do_ipc_exchange(comm, global_stream, ptrs);
 
-        xelink_ptrs_rd = get_ipc_ptrs<void, MAX_GPUS>(even_comm, 0, (void *)send_buf, sched);
-        xelink_ptrs_wr = get_ipc_ptrs<void, MAX_GPUS>(even_comm, 1, (void *)recv_buf, sched);
+        sycl_ptrs.xelink_ptrs_rd =
+            get_ipc_ptrs<void, MAX_GPUS>(even_comm, 0, (void *)send_buf, sched);
+        sycl_ptrs.xelink_ptrs_wr =
+            get_ipc_ptrs<void, MAX_GPUS>(even_comm, 1, (void *)recv_buf, sched);
         // use full vector (>= 8 bytes) if remote buffers are 4 byte aligned
         use_full_vector = use_full_vector &&
-                          all_aligned(xelink_ptrs_rd.data(), even_comm->size(), 0, 4) &&
-                          all_aligned(xelink_ptrs_wr.data(), even_comm->size(), 0, 4);
+                          all_aligned(sycl_ptrs.xelink_ptrs_rd.data(), even_comm->size(), 0, 4) &&
+                          all_aligned(sycl_ptrs.xelink_ptrs_wr.data(), even_comm->size(), 0, 4);
 
         if (pair_comm->size() > 1) {
             assert(pair_comm->size() == MAX_TILES);
             int peer_pair_rank = pair_comm->rank() ? 0 : 1;
-            mdfi_ptr_rd = get_ipc_ptrs<void, MAX_TILES>(
+            sycl_ptrs.mdfi_ptr_rd = get_ipc_ptrs<void, MAX_TILES>(
                 pair_comm, 0, (void *)send_buf, sched)[peer_pair_rank];
-            mdfi_ptr_wr = get_ipc_ptrs<void, MAX_TILES>(
+            sycl_ptrs.mdfi_ptr_wr = get_ipc_ptrs<void, MAX_TILES>(
                 pair_comm, 1, (void *)recv_buf, sched)[peer_pair_rank];
-            use_full_vector = use_full_vector && all_aligned(&mdfi_ptr_rd, 1, 0, 4) &&
-                              all_aligned(&mdfi_ptr_wr, 1, 0, 4);
+            use_full_vector = use_full_vector && all_aligned(&sycl_ptrs.mdfi_ptr_rd, 1, 0, 4) &&
+                              all_aligned(&sycl_ptrs.mdfi_ptr_wr, 1, 0, 4);
         }
 
         delete exchange_entry;
@@ -149,28 +162,34 @@ ccl::event allreduce_large(const void *send_buf,
         coll_init(comm, global_stream);
     }
     else {
-        coll_init(comm, global_stream);
+        if (comm->is_multi_thread_instance() == true) {
+            coll_initExt(comm, ccl::global_data::get().shared_data->hash_table, global_stream);
+        }
+        else {
+            coll_init(comm, global_stream);
+        }
+
         // 0 index is used for tmp work buffer and
         // 1 index is used to copy input data
         // 2 index is used to copy output data
-        xelink_ptrs_rd = get_remote_even_tmp_buf(1);
-        xelink_ptrs_wr = get_remote_even_tmp_buf(2);
+        sycl_ptrs.xelink_ptrs_rd = get_remote_even_tmp_buf(1, comm);
+        sycl_ptrs.xelink_ptrs_wr = get_remote_even_tmp_buf(2, comm);
         if (pair_comm->size() > 1) {
             assert(pair_comm->size() == MAX_TILES);
             int peer_pair_rank = pair_comm->rank() ? 0 : 1;
-            mdfi_ptr_rd = get_remote_pair_tmp_buf(1)[peer_pair_rank];
-            mdfi_ptr_wr = get_remote_pair_tmp_buf(2)[peer_pair_rank];
+            sycl_ptrs.mdfi_ptr_rd = get_remote_pair_tmp_buf(1, comm)[peer_pair_rank];
+            sycl_ptrs.mdfi_ptr_wr = get_remote_pair_tmp_buf(2, comm)[peer_pair_rank];
         }
     }
 
     auto lambda = [&]<typename T, int NE, int NP>() {
         if (use_full_vector) {
             return allreduce_large_impl<T, NE, NP, true>(
-                send_buf, recv_buf, count, dtype, reduction, comm, global_stream, deps);
+                send_buf, recv_buf, count, dtype, reduction, comm, global_stream, sycl_ptrs, deps);
         }
         else {
             return allreduce_large_impl<T, NE, NP, false>(
-                send_buf, recv_buf, count, dtype, reduction, comm, global_stream, deps);
+                send_buf, recv_buf, count, dtype, reduction, comm, global_stream, sycl_ptrs, deps);
         }
     };
 

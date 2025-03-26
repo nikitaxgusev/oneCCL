@@ -20,10 +20,15 @@
 
 #if defined(CCL_ENABLE_ZE) && defined(CCL_ENABLE_SYCL)
 #include "common/global/ze/ze_data.hpp"
+#ifdef CCL_ENABLE_UMF
+#include "umf/ipc.hpp"
+#endif // CCL_ENABLE_UMF
 #endif // CCL_ENABLE_ZE && CCL_ENABLE_SYCL
 #include "common/utils/utils.hpp"
 #include "hwloc/hwloc_wrapper.hpp"
 #include "internal_types.hpp"
+// TODO: think about the right place
+#include "MT/shared_resource.hpp"
 
 #include <memory>
 #include <thread>
@@ -85,6 +90,8 @@ public:
     std::unique_ptr<ccl_hwloc_wrapper> hwloc_wrapper;
     std::unique_ptr<profile::metrics_manager> metrics_profiler;
     std::unique_ptr<profile::timestamp_manager> timestamp_manager;
+    std::unique_ptr<shared_resources> shared_data;
+    std::unordered_map<int, std::unordered_map<int, std::vector<void*>>> hash_table;
 
 #if defined(CCL_ENABLE_ZE) && defined(CCL_ENABLE_SYCL)
     std::unique_ptr<ze::global_data_desc> ze_data;

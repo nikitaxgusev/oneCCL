@@ -84,6 +84,18 @@ static int get_rank_from_env() {
     return ccl::utils::invalid_rank;
 }
 
+CCL_API ccl_logger& ccl_logger::get_instance() {
+    return logger;
+}
+
+CCL_API bool ccl_logger::is_abort_on_throw_enabled() {
+    return abort_on_throw;
+}
+
+CCL_API ccl_log_level ccl_logger::get_log_level() noexcept {
+    return level;
+}
+
 bool ccl_logger::is_root() {
     static thread_local bool rank_read = false;
     static thread_local int rank = ccl::utils::invalid_rank;

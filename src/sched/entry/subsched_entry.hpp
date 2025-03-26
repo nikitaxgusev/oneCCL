@@ -141,7 +141,7 @@ public:
         if (ccl::global_data::env().sched_dump) {
             std::stringstream ostream;
             subsched->dump(ostream);
-            logger.info(ostream.str());
+            ccl_logger::get_instance().info(ostream.str());
         }
 
         status = ccl_sched_entry_status_started;

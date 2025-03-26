@@ -49,7 +49,12 @@ ccl_algorithm_selector<ccl_coll_send>::ccl_algorithm_selector() {
     // send currently does not support scale-out selection, but the table
     // has to be defined, therefore duplicating main table
     scaleout_table = main_table;
-    insert(fallback_table, 0, CCL_SELECTION_MAX_COLL_SIZE, ccl_coll_send_direct);
+
+    // copy the fallback table to global data to manage fallbacks dynamically
+    // needed for group API pt2pt
+    ccl::global_data::env().fallback_send =
+        std::shared_ptr<ccl_selection_table_t<ccl_coll_send_algo>>(
+            &fallback_table, [](ccl_selection_table_t<ccl_coll_send_algo>* table) {});
 }
 
 template <>

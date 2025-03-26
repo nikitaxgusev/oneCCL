@@ -26,6 +26,8 @@
 #include "ccl_api_functions_generators.hpp"
 #include "common/global/global.hpp"
 #include "common/api_wrapper/mpi_api_wrapper.hpp"
+// WA for broadcast to avoid scheduler completely
+#include "coll/algorithms/broadcast/mpi_bcast_invoke.hpp"
 namespace ccl {
 
 namespace v1 {
@@ -95,15 +97,6 @@ stream create_stream() {
 
 namespace preview {
 
-vector_class<communicator> split_communicators(
-    const vector_class<pair_class<communicator, comm_split_attr>>& attrs) {
-    // TODO not implemented
-    throw ccl::exception(std::string(__PRETTY_FUNCTION__) + " - is not implemented");
-
-    // return detail::environment::instance().split_device_communicators(attrs);
-    return {};
-}
-
 /* communicator */
 communicator create_communicator(const comm_attr& attr) {
     return ccl::detail::environment::instance().create_communicator(attr);
@@ -118,6 +111,19 @@ communicator create_communicator(const int size,
 } // namespace preview
 
 namespace v1 {
+/***************** SPLIT COMMUNICATOR *****************/
+
+vector_class<communicator> split_communicators(
+    const vector_class<pair_class<communicator, comm_split_attr>>& attrs) {
+    throw ccl::exception(std::string(__PRETTY_FUNCTION__) + " - is not implemented");
+
+    return {};
+}
+
+communicator split_communicator(const communicator& comm, int color, int key) {
+    return ccl::detail::environment::instance().split_communicator(comm, color, key);
+}
+
 /******************** COMMUNICATOR ********************/
 communicator create_communicator(const int size,
                                  const int rank,
@@ -834,6 +840,10 @@ event broadcast(void* buf,
                 const broadcast_attr& attr,
                 const vector_class<event>& deps) {
     impl_dispatch disp;
+    if (ccl::global_data::env().use_mpi_bcast_wa) {
+        ccl_comm* global_comm = (ccl_comm*)(disp(comm).get());
+        return invoke_mpi_bcast(buf, count, dtype, root, global_comm, op_stream, attr, deps);
+    }
     return disp(comm)->bcast(buf, count, dtype, root, disp(op_stream), attr, deps);
 }
 

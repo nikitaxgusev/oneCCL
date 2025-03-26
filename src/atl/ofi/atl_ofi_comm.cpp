@@ -17,51 +17,17 @@
 #include "atl/util/pm/pmi_resizable_rt/pmi_resizable_simple.h"
 #include "atl/util/pm/pmi_rt/pmi_simple.h"
 #include "atl/util/pm/pmi_resizable_rt/pmi_resizable/kvs/internal_kvs.h"
-#include "atl/util/pm/pmi_resizable_rt/pmi_resizable.h"
 #include "atl/util/pm/pmi_resizable_rt/pmi_resizable_simple_internal.h"
 #include "atl/ofi/atl_ofi.hpp"
 #include "exec/exec.hpp"
 
 atl_ofi_comm::atl_ofi_comm() {
-    char* pm_type_str = getenv(PM_TYPE);
-
-    if (pm_type_str) {
-        if (strstr(pm_type_str, PM_RT_VAL_SIMPLE)) {
-            pmi = std::shared_ptr<ipmi>(new pmi_simple());
-        }
-        else if (strstr(pm_type_str, PM_RT_VAL_RESIZABLE)) {
-            std::shared_ptr<ikvs_wrapper> k(new internal_kvs());
-            pmi = std::shared_ptr<ipmi>(new pmi_resizable(k));
-        }
-        else {
-            LOG_ERROR("unknown ", PM_TYPE, ": ", pm_type_str);
-        }
-    }
-    else {
-        pmi = std::shared_ptr<ipmi>(new pmi_simple());
-    }
-
+    pmi = std::shared_ptr<ipmi>(new pmi_simple());
     CCL_THROW_IF_NOT(init_transport(true) == ATL_STATUS_SUCCESS, "init transport failed");
 }
 
 atl_ofi_comm::atl_ofi_comm(std::shared_ptr<ikvs_wrapper> k) {
-    char* pm_type_str = getenv(PM_TYPE);
-
-    if (pm_type_str) {
-        if (strstr(pm_type_str, PM_RT_VAL_SIMPLE)) {
-            pmi = std::shared_ptr<ipmi>(new pmi_simple());
-        }
-        else if (strstr(pm_type_str, PM_RT_VAL_RESIZABLE)) {
-            pmi = std::shared_ptr<ipmi>(new pmi_resizable(k));
-        }
-        else {
-            LOG_ERROR("unknown ", PM_TYPE, ": ", pm_type_str);
-        }
-    }
-    else {
-        pmi = std::shared_ptr<ipmi>(new pmi_simple());
-    }
-
+    pmi = std::shared_ptr<ipmi>(new pmi_simple());
     CCL_THROW_IF_NOT(init_transport(true) == ATL_STATUS_SUCCESS, "init transport failed");
 }
 
@@ -193,8 +159,8 @@ std::shared_ptr<atl_base_comm> atl_ofi_comm::comm_split(int color, int key) {
 
 atl_ofi_comm::atl_ofi_comm(atl_ofi_comm* parent, int color) {
     eps = parent->eps;
-    parent_size = parent->parent_size;
-    parent_rank = parent->parent_rank;
+    parent_size = parent->size;
+    parent_rank = parent->rank;
     pmi = parent->pmi;
 
     coord.hostname_hash = transport->get_proc_coord().hostname_hash;
@@ -291,7 +257,7 @@ atl_status_t atl_ofi_comm::init_transport(bool is_new) {
         coord = transport->get_proc_coord();
         coord.validate(rank, size);
 
-        transport->get_rank2proc_map(pmi, rank2proc_map);
+        transport->get_rank2proc_map(pmi, rank2proc_map, coord);
         rank2rank_map.resize(size);
         for (int i = 0; i < size; i++) {
             rank2rank_map[i] = i;

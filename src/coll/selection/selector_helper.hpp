@@ -37,8 +37,25 @@ struct ccl_algorithm_selector_helper {
 };
 
 template <typename algo_group_type>
-const std::string& ccl_coll_algorithm_to_str(algo_group_type algo) {
+inline const std::string ccl_coll_algorithm_to_str(algo_group_type algo) {
     return ccl_algorithm_selector_helper<algo_group_type>::algo_to_str(algo);
+}
+
+// Template specialication for int
+template <>
+inline const std::string ccl_coll_algorithm_to_str(int algo) {
+    return std::to_string(algo);
+}
+
+template <typename algo_group_type>
+inline algo_group_type ccl_coll_algorithm_from_str(const std::string& str) {
+    return ccl_algorithm_selector_helper<algo_group_type>::algo_from_str(str);
+}
+
+// Template specialication for int
+template <>
+inline int ccl_coll_algorithm_from_str(const std::string& str) {
+    return std::stoi(str);
 }
 
 #define CCL_SELECTION_DEFINE_HELPER_METHODS( \

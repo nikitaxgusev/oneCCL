@@ -18,9 +18,12 @@
 using namespace std;
 using namespace sycl;
 
-int vectorized_counts(queue &q, ccl::communicator &comm, ccl::stream &stream, int size, int rank) {
-    const size_t count = 10 * 1024 * 1024;
-
+int vectorized_counts(queue &q,
+                      ccl::communicator &comm,
+                      ccl::stream &stream,
+                      int size,
+                      int rank,
+                      size_t count) {
     /* create buffers */
     sycl::buffer<int> send_buf(count * size);
     sycl::buffer<int> recv_buf(count * size);
@@ -169,6 +172,23 @@ int non_vectorized_counts(queue &q,
 }
 
 int main(int argc, char *argv[]) {
+    if (argc < 2) {
+        cout << "usage ./sycl_alltoallv_test [device]\n";
+        cout << "device could be 'cpu' or 'gpu'\n";
+        cout << "example: ./sycl_alltoallv_test cpu\n";
+        exit(1);
+    }
+
+    string device_type = argv[1];
+
+    if (device_type != "cpu" && device_type != "gpu") {
+        cout << "error: Invalid device '" << device_type << "'.\n";
+        cout << "device must be either 'cpu' or 'gpu'.\n";
+        exit(1);
+    }
+
+    size_t count = 10 * 1024 * 1024;
+
     int size = 0;
     int rank = 0;
 
@@ -180,10 +200,15 @@ int main(int argc, char *argv[]) {
 
     atexit(mpi_finalize);
 
-    queue q;
-    if (!create_sycl_queue(argc, argv, rank, q)) {
-        return -1;
+    test_args args(argc, argv, rank);
+
+    if (args.count != args.DEFAULT_COUNT) {
+        count = args.count;
     }
+
+    sycl::queue q;
+    if (!create_test_sycl_queue(device_type, rank, q, args))
+        return -1;
 
     /* create kvs */
     ccl::shared_ptr_class<ccl::kvs> kvs;
@@ -207,7 +232,7 @@ int main(int argc, char *argv[]) {
     auto stream = ccl::create_stream(q);
 
     /* run examples */
-    int ret = vectorized_counts(q, comm, stream, size, rank);
+    int ret = vectorized_counts(q, comm, stream, size, rank, count);
     if (ret == -1)
         return -1;
     ret = non_vectorized_counts(q, comm, stream, size, rank);

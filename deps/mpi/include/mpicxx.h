@@ -266,10 +266,10 @@ class Datatype  {
     {
         MPIX_CALLWORLD( MPI_Type_free( (MPI_Datatype *) &the_real_datatype ));
     }
-    virtual Datatype Create_indexed( int v1, const int * v2, const int * v3 ) const
+    virtual Datatype Create_indexed( int v1, const int v2[], const int v3[] ) const
     {
         Datatype v5;
-        MPIX_CALLWORLD( MPI_Type_indexed( v1, (const int *)v2, (const int *)v3, (MPI_Datatype) the_real_datatype, &(v5.the_real_datatype) ));
+        MPIX_CALLWORLD( MPI_Type_indexed( v1, (const int  *)v2, (const int  *)v3, (MPI_Datatype) the_real_datatype, &(v5.the_real_datatype) ));
         return v5;
     }
     virtual Datatype Create_contiguous( int v1 ) const
@@ -334,7 +334,7 @@ class Datatype  {
         MPIX_CALLWORLD( MPI_Type_create_indexed_block( v1, v2, (const int  *)v3, (MPI_Datatype) the_real_datatype, &(v5.the_real_datatype) ));
         return v5;
     }
-    virtual Aint Pack_external_size( const char v1[], int v2 ) const
+    virtual Aint Pack_external_size( const char * v1, int v2 ) const
     {
         MPI_Aint v4;
         MPIX_CALLWORLD( MPI_Pack_external_size( v1, v2, (MPI_Datatype) the_real_datatype, &v4 ));
@@ -434,7 +434,7 @@ class Datatype  {
         MPIX_CALLWORLD( MPI_Type_create_f90_integer( v1, &(v2.the_real_datatype) ));
         return v2;
     }
-    virtual void Pack_external( const char v1[], const void * v2, const int v3, void * v5, Aint v6, Aint & v7 ) const
+    virtual void Pack_external( const char * v1, const void * v2, const int v3, void * v5, Aint v6, Aint & v7 ) const
     {
         MPIX_CALLWORLD( MPI_Pack_external( v1, (const void *)v2, (int)v3, (MPI_Datatype) the_real_datatype, v5, v6, &v7 ));
     }

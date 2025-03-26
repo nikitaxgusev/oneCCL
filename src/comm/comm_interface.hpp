@@ -111,7 +111,7 @@ struct comm_interface : public comm_selector {
     virtual int rank() const = 0;
     virtual int size() const = 0;
 
-    virtual ccl::comm_interface_ptr split(const ccl::comm_split_attr& attr) = 0;
+    virtual ccl::comm_interface_ptr split(int color, int key, bool split_external_use = false) = 0;
 
     // collectives operation declarations
     virtual ccl::event barrier(const stream::impl_value_t& op_stream,

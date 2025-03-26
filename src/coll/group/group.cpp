@@ -13,6 +13,7 @@
  See the License for the specific language governing permissions and
  limitations under the License.
 */
+#include "coll/coll_util.hpp"
 #include "coll/group/group.hpp"
 #include "common/global/global.hpp"
 
@@ -27,6 +28,7 @@ void group_impl::start() {
     LOG_INFO("group operation is started");
     operation_storage.clear();
     is_group_active = true;
+    ccl::enable_direct_fallback_for_pt2pt();
 }
 
 void group_impl::end() {
@@ -38,21 +40,19 @@ void group_impl::end() {
         ccl::global_data::env().ze_pt2pt_read = 1;
 #endif // CCL_ENABLE_SYCL
         first_group_op = true;
+        ccl::event event;
         for (const auto& operation : operation_storage) {
-            // this for sanity check, but main check is in add_operation
-            if (operation.first != ccl_coll_send && operation.first != ccl_coll_recv) {
-                CCL_THROW(ccl_coll_type_to_str(operation.first),
-                          " - is not supported for group API."
-                          "Only send and recv operations are allowed.");
-            }
-            operation.second();
+            event = operation.second();
             first_group_op = false;
         }
         first_group_op = false; // needed in case operation_storage is empty
+        // wait() is needed to avoid oneCCL destruction prior to device tasks completion
+        event.wait();
 #ifdef CCL_ENABLE_SYCL
         ccl::global_data::env().ze_pt2pt_read = store_ze_pt2pt_read;
 #endif // CCL_ENABLE_SYCL
     }
+    ccl::restore_pt2pt_fallback_table();
     LOG_INFO("group operation is ended");
     is_group_active = false;
     operation_storage.clear();
@@ -60,11 +60,6 @@ void group_impl::end() {
 
 void group_impl::add_operation(ccl_coll_type ctype, std::function<ccl::event()> operation) {
     if (is_group_active) {
-        if (ctype != ccl_coll_send && ctype != ccl_coll_recv) {
-            CCL_THROW(ccl_coll_type_to_str(ctype),
-                      " - is not supported for group API."
-                      "Only send and recv operations are allowed.");
-        }
         operation_storage.push_back(std::make_pair(ctype, std::move(operation)));
     }
     else {

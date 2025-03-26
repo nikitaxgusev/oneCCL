@@ -56,6 +56,17 @@ struct comm_selector {
                                                device_t ccl_device,
                                                context_t ccl_context,
                                                shared_ptr_class<kvs_interface> kvs);
+    static comm_interface_ptr create_comm_implExt();
+    static comm_interface_ptr create_comm_implExt(const size_t size,
+                                                  shared_ptr_class<kvs_interface> kvs);
+    static comm_interface_ptr create_comm_implExt(const size_t size,
+                                                  const int rank,
+                                                  shared_ptr_class<kvs_interface> kvs);
+    static comm_interface_ptr create_comm_implExt(const size_t size,
+                                                  const int rank,
+                                                  device_t ccl_device,
+                                                  context_t ccl_context,
+                                                  shared_ptr_class<kvs_interface> kvs);
 };
 
 } // namespace ccl

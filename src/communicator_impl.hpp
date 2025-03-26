@@ -38,6 +38,17 @@ CCL_API vector_class<communicator> communicator::create_communicators(
 }
 
 template <class DeviceType, class ContextType>
+CCL_API vector_class<communicator> communicator::create_communicatorsExt(
+    const int size,
+    const vector_class<DeviceType>& devices,
+    const ContextType& context,
+    shared_ptr_class<kvs_interface> kvs) {
+    vector_class<communicator> ret;
+    throw std::runtime_error(std::string(__FUNCTION__) + " - not implemented");
+    return ret;
+}
+
+template <class DeviceType, class ContextType>
 CCL_API vector_class<communicator> communicator::create_communicators(
     const int size,
     const vector_class<pair_class<int, DeviceType>>& devices,
@@ -57,7 +68,39 @@ CCL_API vector_class<communicator> communicator::create_communicators(
 }
 
 template <class DeviceType, class ContextType>
+CCL_API vector_class<communicator> communicator::create_communicatorsExt(
+    const int size,
+    const vector_class<pair_class<int, DeviceType>>& devices,
+    const ContextType& context,
+    shared_ptr_class<kvs_interface> kvs) {
+    LOG_DEBUG("size: ", size, ", local ranks: ", devices.size());
+
+    CCL_THROW_IF_NOT(devices.size() == 1, "multiple devices per thread are not supported");
+
+    ccl::comm_interface_ptr impl = ccl::comm_interface::create_comm_implExt(
+        size, devices.begin()->first, devices.begin()->second, context, kvs);
+
+    ccl::vector_class<ccl::communicator> ret;
+    ret.push_back(ccl::communicator(std::move(impl)));
+
+    return ret;
+}
+
+template <class DeviceType, class ContextType>
 CCL_API vector_class<communicator> communicator::create_communicators(
+    const int size,
+    const map_class<int, DeviceType>& devices,
+    const ContextType& context,
+    shared_ptr_class<kvs_interface> kvs) {
+    std::vector<pair_class<int, DeviceType>> vec_devices;
+    for (const auto& d : devices) {
+        vec_devices.push_back(std::make_pair(d.first, d.second));
+    }
+    return create_communicators(size, vec_devices, context, kvs);
+}
+
+template <class DeviceType, class ContextType>
+CCL_API vector_class<communicator> communicator::create_communicatorsExt(
     const int size,
     const map_class<int, DeviceType>& devices,
     const ContextType& context,
@@ -119,6 +162,11 @@ communicator communicator::create_communicator(const int size,
     return communicator(std::move(impl));
 }
 
+communicator communicator::split_communicator(const communicator& comm, int color, int key) {
+    LOG_DEBUG("create splitted communicator");
+    return const_cast<communicator&>(comm).split(color, key, true);
+}
+
 } // namespace v1
 
 } // namespace ccl
@@ -129,10 +177,23 @@ communicator communicator::create_communicator(const int size,
         const int comm_size, \
         const ccl::vector_class<DeviceType>& local_devices, \
         const ContextType& context, \
-        ccl::shared_ptr_class<ccl::kvs_interface> kvs);
+        ccl::shared_ptr_class<ccl::kvs_interface> kvs); \
+\
+    template ccl::vector_class<ccl::communicator> CCL_API \
+    ccl::communicator::create_communicatorsExt(const int comm_size, \
+                                               const ccl::vector_class<DeviceType>& local_devices, \
+                                               const ContextType& context, \
+                                               ccl::shared_ptr_class<ccl::kvs_interface> kvs);
 
 #define API_COMM_CREATE_WITH_RANK_IN_VECTOR_EXPLICIT_INSTANTIATION(DeviceType, ContextType) \
     template ccl::vector_class<ccl::communicator> CCL_API ccl::communicator::create_communicators( \
+        const int comm_size, \
+        const ccl::vector_class<ccl::pair_class<int, DeviceType>>& local_rank_device_map, \
+        const ContextType& context, \
+        ccl::shared_ptr_class<ccl::kvs_interface> kvs); \
+\
+    template ccl::vector_class<ccl::communicator> CCL_API \
+    ccl::communicator::create_communicatorsExt( \
         const int comm_size, \
         const ccl::vector_class<ccl::pair_class<int, DeviceType>>& local_rank_device_map, \
         const ContextType& context, \
@@ -140,6 +201,13 @@ communicator communicator::create_communicator(const int size,
 
 #define API_COMM_CREATE_WITH_RANK_IN_MAP_EXPLICIT_INSTANTIATION(DeviceType, ContextType) \
     template ccl::vector_class<ccl::communicator> CCL_API ccl::communicator::create_communicators( \
+        const int comm_size, \
+        const ccl::map_class<int, DeviceType>& local_rank_device_map, \
+        const ContextType& context, \
+        ccl::shared_ptr_class<ccl::kvs_interface> kvs); \
+\
+    template ccl::vector_class<ccl::communicator> CCL_API \
+    ccl::communicator::create_communicatorsExt( \
         const int comm_size, \
         const ccl::map_class<int, DeviceType>& local_rank_device_map, \
         const ContextType& context, \

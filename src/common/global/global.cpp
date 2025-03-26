@@ -110,6 +110,7 @@ ccl::status global_data::init() {
     }
 
     recycle_storage.reset(new ccl::recycle_storage());
+    shared_data.reset(new shared_resources());
 
     init_resize_dependent_objects();
     init_resize_independent_objects();
@@ -167,6 +168,7 @@ void global_data::getenv_local_coord(const char* local_proc_idx_env_name,
                  "trying to get them from ATL");
         local_proc_idx = CCL_ENV_INT_NOT_SPECIFIED;
         local_proc_count = CCL_ENV_INT_NOT_SPECIFIED;
+        ccl::global_data::env().enable_init_hostname_sharing = 1;
         return;
     }
 

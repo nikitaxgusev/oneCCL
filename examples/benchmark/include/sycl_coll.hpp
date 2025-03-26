@@ -41,6 +41,9 @@ struct sycl_base_coll : base_coll, private strategy {
         size_t send_multiplier = coll_strategy::get_send_multiplier();
         size_t recv_multiplier = coll_strategy::get_recv_multiplier();
 
+        size_t send_count = base_coll::get_allocation_count() * send_multiplier;
+        size_t recv_count = base_coll::get_allocation_count() * recv_multiplier;
+
         if (base_coll::get_max_elem_count() == 0) {
             return;
         }
@@ -60,11 +63,11 @@ struct sycl_base_coll : base_coll, private strategy {
                     ASSERT(0, "unexpected bench_alloc_type %d", bench_alloc_type);
 
                 for (size_t idx = 0; idx < base_coll::get_buf_count(); idx++) {
+                    void* send_buf = nullptr;
+                    void* recv_buf = nullptr;
                     if (!base_coll::get_inplace()) {
-                        send_bufs[idx][rank_idx] = allocator.allocate(
-                            base_coll::get_max_elem_count() * send_multiplier, usm_alloc_type);
-                        recv_bufs[idx][rank_idx] = allocator.allocate(
-                            base_coll::get_max_elem_count() * recv_multiplier, usm_alloc_type);
+                        send_buf = allocator.allocate(send_count, usm_alloc_type);
+                        recv_buf = allocator.allocate(recv_count, usm_alloc_type);
                     }
                     else {
                         bool is_allgatherv = strcmp(coll_strategy::class_name(), "allgatherv") == 0;
@@ -72,38 +75,45 @@ struct sycl_base_coll : base_coll, private strategy {
                         bool is_reduce_scatter =
                             strcmp(coll_strategy::class_name(), "reduce_scatter") == 0;
                         if (is_allgatherv || is_allgather) {
-                            recv_bufs[idx][rank_idx] = allocator.allocate(
-                                base_coll::get_max_elem_count() * recv_multiplier, usm_alloc_type);
-                            send_bufs[idx][rank_idx] =
-                                nullptr; // This will be set when the count is known, since the offset is unknown at this point.
+                            // send_buf will be set when the count is known, since the offset is unknown at this point.
+                            send_buf = nullptr;
+                            recv_buf = allocator.allocate(recv_count, usm_alloc_type);
                         }
                         else if (is_reduce_scatter) {
-                            send_bufs[idx][rank_idx] = allocator.allocate(
-                                base_coll::get_max_elem_count() * send_multiplier, usm_alloc_type);
+                            send_buf = allocator.allocate(send_count, usm_alloc_type);
                             // recv_buf will be set when the count is known, since the offset is unknown at this point.
-                            recv_bufs[idx][rank_idx] = nullptr;
+                            recv_buf = nullptr;
                         }
                         else {
-                            send_bufs[idx][rank_idx] =
-                                allocator.allocate(base_coll::get_max_elem_count() *
-                                                       std::max(send_multiplier, recv_multiplier),
-                                                   usm_alloc_type);
-                            recv_bufs[idx][rank_idx] = send_bufs[idx][rank_idx];
+                            send_buf = allocator.allocate(std::max(send_count, recv_count),
+                                                          usm_alloc_type);
+                            recv_buf = send_buf;
                         }
                     }
+
+                    // offset send_buf, original deallocated automatically by ~buf_allocator()
+                    if (send_buf) {
+                        send_buf = static_cast<Dtype*>(send_buf) + base_coll::get_elem_offset();
+                    }
+
+                    // offset recv_buf, original deallocated automatically by ~buf_allocator()
+                    if (recv_buf) {
+                        recv_buf = static_cast<Dtype*>(recv_buf) + base_coll::get_elem_offset();
+                    }
+
+                    send_bufs[idx][rank_idx] = send_buf;
+                    recv_bufs[idx][rank_idx] = recv_buf;
                 }
             }
             else {
                 for (size_t idx = 0; idx < base_coll::get_buf_count(); idx++) {
-                    send_bufs[idx][rank_idx] = new sycl::buffer<Dtype, 1>(
-                        base_coll::get_max_elem_count() * send_multiplier);
-                    recv_bufs[idx][rank_idx] = new sycl::buffer<Dtype, 1>(
-                        base_coll::get_max_elem_count() * recv_multiplier);
+                    send_bufs[idx][rank_idx] = new sycl::buffer<Dtype, 1>(send_count);
+                    recv_bufs[idx][rank_idx] = new sycl::buffer<Dtype, 1>(recv_count);
                 }
             }
         }
-        host_send_buf.resize(base_coll::get_max_elem_count() * send_multiplier);
-        host_recv_buf.resize(base_coll::get_max_elem_count() * recv_multiplier);
+        host_send_buf.resize(send_count);
+        host_recv_buf.resize(recv_count);
     }
 
     sycl_base_coll(bench_init_attr init_attr) : sycl_base_coll(init_attr, 1, 1) {}

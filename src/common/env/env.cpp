@@ -13,9 +13,6 @@
  See the License for the specific language governing permissions and
  limitations under the License.
 */
-#include <climits>
-#include <dlfcn.h>
-#include <iterator>
 #include <libgen.h>
 #include <link.h>
 #include <memory>
@@ -32,6 +29,11 @@
 #include "common/utils/version.hpp"
 
 namespace ccl {
+
+static std::map<ccl_sycl_alltoall_protocol, std::string> sycl_alltoall_protocols = {
+    std::make_pair(ccl_sycl_alltoall_protocol::read, "read"),
+    std::make_pair(ccl_sycl_alltoall_protocol::write, "write"),
+};
 
 std::map<ccl_priority_mode, std::string> env_data::priority_mode_names = {
     std::make_pair(ccl_priority_none, "none"),
@@ -107,7 +109,10 @@ env_data::env_data()
           enable_sync_coll(0),
           enable_extra_ep(0),
           enable_auto_cache(1),
-
+#if defined(CCL_ENABLE_MPI) && defined(CCL_ENABLE_OMP)
+          enable_omp_allreduce(1),
+          omp_allreduce_num_threads("1:1-511;2:512-1023;4:1024-4095;8:4096-8191;16:8192-32767;32:32768-max"),
+#endif // CCL_ENABLE_MPI && CCL_ENABLE_OMP
           mnic_type(ATL_MNIC_NONE),
           mnic_count(CCL_ENV_SIZET_NOT_SPECIFIED),
           mnic_offset(ATL_MNIC_OFFSET_NONE),
@@ -136,6 +141,8 @@ env_data::env_data()
           enable_strict_order(0),
           staging_buffer(ccl_staging_regular),
           enable_op_sync(0),
+          enable_hostname_sharing(0),
+          enable_init_hostname_sharing(0),
 
           chunk_count(1),
           min_chunk_size(65536),
@@ -170,14 +177,14 @@ env_data::env_data()
           sycl_allreduce_tmp_buf(0),
           sycl_allreduce_small_threshold(524288),
           sycl_allreduce_medium_threshold(16777216),
-          sycl_allreduce_scaleout_threshold(0),
-          sycl_allreduce_scaleout_direct_threshold(1048576),
+          sycl_allreduce_scaleout_threshold(4294967296),
+          sycl_allreduce_scaleout_algo("auto"),
 
           sycl_reduce_scatter_tmp_buf(0),
           sycl_reduce_scatter_small_threshold(2097152),
           sycl_reduce_scatter_medium_threshold(67108864),
           sycl_reduce_scatter_scaleout_threshold(4294967296),
-          sycl_reduce_scatter_scaleout_direct_threshold(1048576),
+          sycl_reduce_scatter_scaleout_algo("auto"),
 
           sycl_allgatherv_tmp_buf(0),
           sycl_allgatherv_small_threshold(131072),
@@ -198,7 +205,8 @@ env_data::env_data()
           sycl_scaleout_device_buf_size(1024 * 1024 * 1024),
           sycl_kernels_line_size(128),
           sycl_scaleout_buf_alloc_mode(ccl::utils::alloc_mode::hwloc),
-          sycl_pipeline_chunk_size(2097152),
+          sycl_max_pipeline_chunk_size(32 * 1024 * 1024),
+          sycl_pipeline_chunk_size(CCL_ENV_SIZET_NOT_SPECIFIED),
           sycl_enable_pipeline_gpu_rdma(0),
           sycl_enable_direct_gpu_rdma(0),
           sycl_sub_communicator(1),
@@ -233,6 +241,8 @@ env_data::env_data()
           enable_p2p_access(CCL_ENV_INT_NOT_SPECIFIED),
           enable_fabric_vertex_connection_check(1),
           enable_wa_fabric_vertex_connection_check(0),
+          use_mpi_bcast_wa(0),
+          use_root_print_wa(0),
 
 #ifdef CCL_ENABLE_MPI
           mpi_lib_path(),
@@ -240,6 +250,11 @@ env_data::env_data()
           mpi_fp16_native(1),
 #endif // CCL_ENABLE_MPI
           ofi_lib_path(),
+
+#if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE) && defined(CCL_ENABLE_UMF)
+          umf_enable(0),
+          umf_lib_path(),
+#endif // CCL_ENABLE_SYCL && CCL_ENABLE_ZE && CCL_ENABLE_UMF
 
 #ifdef CCL_ENABLE_SYCL
           kernel_path(),
@@ -302,6 +317,7 @@ env_data::env_data()
           ze_enable(1),
           ze_fini_wa(0),
           ze_multi_workers(0),
+          sycl_alltoall_protocol(ccl_sycl_alltoall_protocol::write),
           enable_ze_auto_tune_ports(1),
           ze_ipc_exchange(ccl::ze::ipc_exchange_mode::pidfd),
 #ifdef ZE_PCI_PROPERTIES_EXT_NAME
@@ -316,6 +332,7 @@ env_data::env_data()
           drmfd_dev_render_suffix("-render"),
 #endif // CCL_ENABLE_DRM
 #endif // CCL_ENABLE_SYCL
+          ipc_allgatherv_wa(1),
 
 #ifdef CCL_ENABLE_PMIX
           pmix_lib_path(),
@@ -392,7 +409,10 @@ void env_data::parse() {
     p.env_2_type(CCL_ATL_SYNC_COLL, enable_sync_coll);
     p.env_2_type(CCL_ATL_EXTRA_EP, enable_extra_ep);
     p.env_2_type(CCL_ENABLE_AUTO_CACHE, enable_auto_cache);
-
+#if defined(CCL_ENABLE_MPI) && defined(CCL_ENABLE_OMP)
+    p.env_2_type(CCL_ENABLE_OMP_ALLREDUCE, enable_omp_allreduce);
+    p.env_2_type(CCL_OMP_ALLREDUCE_NUM_THREADS, omp_allreduce_num_threads);
+#endif // CCL_ENABLE_MPI && CCL_ENABLE_OMP
     p.env_2_enum(CCL_MNIC, mnic_type_names, mnic_type);
     p.env_2_type(CCL_MNIC_NAME, mnic_name_raw);
     p.env_2_type(CCL_MNIC_COUNT, mnic_count);
@@ -468,6 +488,8 @@ void env_data::parse() {
     }
     p.env_2_enum(CCL_STAGING_BUFFER, staging_buffer_names, staging_buffer);
     p.env_2_type(CCL_OP_SYNC, enable_op_sync);
+    p.env_2_type(CCL_OFI_ENABLE_HOSTNAME_SHARING, enable_hostname_sharing);
+    p.env_2_type(CCL_OFI_INIT_ENABLE_HOSTNAME_SHARING, enable_init_hostname_sharing);
 
     p.env_2_type(CCL_CHUNK_COUNT, chunk_count);
     CCL_THROW_IF_NOT(chunk_count >= 1, "incorrect ", CCL_CHUNK_COUNT, " ", chunk_count);
@@ -505,13 +527,13 @@ void env_data::parse() {
     p.env_2_type(CCL_SYCL_ALLREDUCE_SMALL_THRESHOLD, sycl_allreduce_small_threshold);
     p.env_2_type(CCL_SYCL_ALLREDUCE_MEDIUM_THRESHOLD, sycl_allreduce_medium_threshold);
     p.env_2_type(CCL_SYCL_ALLREDUCE_SCALEOUT_THRESHOLD, sycl_allreduce_scaleout_threshold);
-    p.env_2_type(CCL_SYCL_ALLREDUCE_SCALEOUT_DIRECT_THRESHOLD, sycl_allreduce_scaleout_direct_threshold);
+    p.env_2_type(CCL_SYCL_ALLREDUCE_SCALEOUT, sycl_allreduce_scaleout_algo);
 
     p.env_2_type(CCL_SYCL_REDUCE_SCATTER_TMP_BUF, sycl_reduce_scatter_tmp_buf);
     p.env_2_type(CCL_SYCL_REDUCE_SCATTER_SMALL_THRESHOLD, sycl_reduce_scatter_small_threshold);
     p.env_2_type(CCL_SYCL_REDUCE_SCATTER_MEDIUM_THRESHOLD, sycl_reduce_scatter_medium_threshold);
     p.env_2_type(CCL_SYCL_REDUCE_SCATTER_SCALEOUT_THRESHOLD, sycl_reduce_scatter_scaleout_threshold);
-    p.env_2_type(CCL_SYCL_REDUCE_SCATTER_SCALEOUT_DIRECT_THRESHOLD, sycl_reduce_scatter_scaleout_direct_threshold);
+    p.env_2_type(CCL_SYCL_REDUCE_SCATTER_SCALEOUT, sycl_reduce_scatter_scaleout_algo);
 
     p.env_2_type(CCL_SYCL_ALLGATHERV_TMP_BUF, sycl_allgatherv_tmp_buf);
     p.env_2_type(CCL_SYCL_ALLGATHERV_SMALL_THRESHOLD, sycl_allgatherv_small_threshold);
@@ -533,7 +555,8 @@ void env_data::parse() {
     p.env_2_type(CCL_SYCL_SCALEOUT_DEVICE_BUF_SIZE, sycl_scaleout_device_buf_size);
     p.env_2_type(CCL_SYCL_KERNELS_LINE_SIZE, sycl_kernels_line_size);
     p.env_2_enum(CCL_SYCL_SCALEOUT_BUF_ALLOC_MODE, ccl::utils::alloc_mode_names, sycl_scaleout_buf_alloc_mode);
-    p.env_2_type(CCL_SYCL_PIPELINE_CHUNK_SIZE, sycl_pipeline_chunk_size);
+    p.env_2_type(CCL_SYCL_MAX_PIPELINE_CHUNK_SIZE, sycl_max_pipeline_chunk_size);
+    p.env_2_type(CCL_SYCL_PIPELINE_CHUNK_SIZE, (size_t&)sycl_pipeline_chunk_size);
     p.env_2_type(CCL_SYCL_ENABLE_PIPELINE_GPU_RDMA, sycl_enable_pipeline_gpu_rdma);
     p.env_2_type(CCL_SYCL_ENABLE_DIRECT_GPU_RDMA, sycl_enable_direct_gpu_rdma);
     p.env_2_type(CCL_SYCL_SUB_COMMUICATOR, sycl_sub_communicator);
@@ -574,6 +597,8 @@ void env_data::parse() {
     p.env_2_type(CCL_TOPO_P2P_ACCESS, enable_p2p_access);
     p.env_2_type(CCL_TOPO_FABRIC_VERTEX_CONNECTION_CHECK, enable_fabric_vertex_connection_check);
     p.env_2_type(CCL_TOPO_WA_FABRIC_VERTEX_CONNECTION_CHECK, enable_wa_fabric_vertex_connection_check);
+    p.env_2_type(CCL_USE_MPI_BCAST_WA, use_mpi_bcast_wa);
+    p.env_2_type(CCL_USE_ROOT_PRINT_WA, use_root_print_wa);
 
 #ifdef CCL_ENABLE_MPI
     p.env_2_type(CCL_MPI_LIBRARY_PATH, mpi_lib_path);
@@ -581,6 +606,11 @@ void env_data::parse() {
     p.env_2_type(CCL_ATL_MPI_FP16, mpi_fp16_native);
 #endif // CCL_ENABLE_MPI
     p.env_2_type(CCL_OFI_LIBRARY_PATH, ofi_lib_path);
+
+#if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE) && defined(CCL_ENABLE_UMF)
+    p.env_2_type(CCL_UMF_ENABLE, umf_enable);
+    p.env_2_type(CCL_UMF_LIBRARY_PATH, umf_lib_path);
+#endif // CCL_ENABLE_SYCL && CCL_ENABLE_ZE && CCL_ENABLE_UMF
 
 #ifdef CCL_ENABLE_SYCL
     p.env_2_type(CCL_KERNEL_PATH, kernel_path);
@@ -690,6 +720,7 @@ void env_data::parse() {
     p.env_2_type(CCL_ZE_ENABLE, ze_enable);
     p.env_2_type(CCL_ZE_FINI_WA, ze_fini_wa);
     p.env_2_type(CCL_ZE_MULTI_WORKERS, ze_multi_workers);
+    p.env_2_enum(CCL_SYCL_ALLTOALL_PROTOCOL, sycl_alltoall_protocols, sycl_alltoall_protocol);
     p.env_2_type(CCL_ZE_AUTO_TUNE_PORTS, enable_ze_auto_tune_ports);
     p.env_2_enum(CCL_ZE_IPC_EXCHANGE, ze::ipc_exchange_names, ze_ipc_exchange);
     p.env_2_type(CCL_ZE_DRM_BDF_SUPPORT, ze_drm_bdf_support);
@@ -698,6 +729,7 @@ void env_data::parse() {
     p.env_2_type(CCL_DRMFD_DEV_RENDER_DIR_PATH, drmfd_dev_render_dir_path);
     p.env_2_type(CCL_DRMFD_DEV_RENDER_SUFFIX, drmfd_dev_render_suffix);
 #endif // CCL_ENABLE_SYCL
+    p.env_2_type(CCL_IPC_ALLGATHERV_WA, ipc_allgatherv_wa);
 
 #ifdef CCL_ENABLE_PMIX
     p.env_2_type(CCL_PMIX_LIBRARY_PATH, pmix_lib_path);
@@ -722,7 +754,7 @@ void env_data::parse() {
     p.warn_about_unused_var();
 }
 
-void env_data::print(int rank) {
+void env_data::print(int rank, bool is_mt_enabled) {
     std::lock_guard<ccl_spinlock> lock{ print_guard };
 
     if (was_printed)
@@ -751,21 +783,25 @@ void env_data::print(int rank) {
         LOG_INFO(global_data.hwloc_wrapper->to_string());
     }
 
-    auto local_proc_idx = global_data.get_local_proc_idx();
-    auto local_proc_count = global_data.get_local_proc_count();
+    // TODO: here is segfault seems in worker_affinity / worker_mem_affinity
+    //  when you use threads, fix it.
+    if (!is_mt_enabled) {
+        auto local_proc_idx = global_data.get_local_proc_idx();
+        auto local_proc_count = global_data.get_local_proc_count();
 
-    if (rank < local_proc_count) {
-        for (size_t w_idx = 0; w_idx < worker_count; w_idx++) {
-            LOG_INFO("local process [",
-                     local_proc_idx,
-                     ":",
-                     local_proc_count,
-                     "]: worker: ",
-                     w_idx,
-                     ", cpu: ",
-                     worker_affinity[local_proc_idx * worker_count + w_idx],
-                     ", numa: ",
-                     worker_mem_affinity[local_proc_idx * worker_count + w_idx]);
+        if (rank < local_proc_count) {
+            for (size_t w_idx = 0; w_idx < worker_count; w_idx++) {
+                LOG_INFO("local process [",
+                         local_proc_idx,
+                         ":",
+                         local_proc_count,
+                         "]: worker: ",
+                         w_idx,
+                         ", cpu: ",
+                         worker_affinity[local_proc_idx * worker_count + w_idx],
+                         ", numa: ",
+                         worker_mem_affinity[local_proc_idx * worker_count + w_idx]);
+            }
         }
     }
 
@@ -802,7 +838,10 @@ void env_data::print(int rank) {
     LOG_DEBUG(CCL_ATL_SYNC_COLL, ": ", enable_sync_coll);
     LOG_DEBUG(CCL_ATL_EXTRA_EP, ": ", enable_extra_ep);
     LOG_DEBUG(CCL_ENABLE_AUTO_CACHE, ": ", enable_auto_cache);
-
+#if defined(CCL_ENABLE_MPI) && defined(CCL_ENABLE_OMP)
+    LOG_DEBUG(CCL_ENABLE_OMP_ALLREDUCE, ": ", enable_omp_allreduce);
+    LOG_DEBUG(CCL_OMP_ALLREDUCE_NUM_THREADS, ": ", omp_allreduce_num_threads);
+#endif // CCL_ENABLE_MPI && CCL_ENABLE_OMP
     LOG_INFO(CCL_MNIC, ": ", str_by_enum(mnic_type_names, mnic_type));
     LOG_INFO(
         CCL_MNIC_NAME, ": ", (mnic_name_raw.length()) ? mnic_name_raw : CCL_ENV_STR_NOT_SPECIFIED);
@@ -890,6 +929,8 @@ void env_data::print(int rank) {
     LOG_INFO(CCL_STRICT_ORDER, ": ", enable_strict_order);
     LOG_INFO(CCL_STAGING_BUFFER, ": ", str_by_enum(staging_buffer_names, staging_buffer));
     LOG_INFO(CCL_OP_SYNC, ": ", enable_op_sync);
+    LOG_INFO(CCL_OFI_ENABLE_HOSTNAME_SHARING, ": ", enable_hostname_sharing);
+    LOG_INFO(CCL_OFI_INIT_ENABLE_HOSTNAME_SHARING, ": ", enable_init_hostname_sharing);
 
     LOG_INFO(CCL_CHUNK_COUNT, ": ", chunk_count);
     LOG_INFO(CCL_MIN_CHUNK_SIZE, ": ", min_chunk_size);
@@ -921,13 +962,13 @@ void env_data::print(int rank) {
     LOG_INFO(CCL_SYCL_ALLREDUCE_SMALL_THRESHOLD, ": ", sycl_allreduce_small_threshold);
     LOG_INFO(CCL_SYCL_ALLREDUCE_MEDIUM_THRESHOLD, ": ", sycl_allreduce_medium_threshold);
     LOG_INFO(CCL_SYCL_ALLREDUCE_SCALEOUT_THRESHOLD, ": ", sycl_allreduce_scaleout_threshold);
-    LOG_INFO(CCL_SYCL_ALLREDUCE_SCALEOUT_DIRECT_THRESHOLD, ": ", sycl_allreduce_scaleout_direct_threshold);
+    LOG_INFO(CCL_SYCL_ALLREDUCE_SCALEOUT, ": ", (!sycl_allreduce_scaleout_algo.empty()) ? sycl_allreduce_scaleout_algo : CCL_ENV_STR_NOT_SPECIFIED);
 
     LOG_INFO(CCL_SYCL_REDUCE_SCATTER_TMP_BUF, ": ", sycl_reduce_scatter_tmp_buf);
     LOG_INFO(CCL_SYCL_REDUCE_SCATTER_SMALL_THRESHOLD, ": ", sycl_reduce_scatter_small_threshold);
     LOG_INFO(CCL_SYCL_REDUCE_SCATTER_MEDIUM_THRESHOLD, ": ", sycl_reduce_scatter_medium_threshold);
     LOG_INFO(CCL_SYCL_REDUCE_SCATTER_SCALEOUT_THRESHOLD, ": ", sycl_reduce_scatter_scaleout_threshold);
-    LOG_INFO(CCL_SYCL_REDUCE_SCATTER_SCALEOUT_DIRECT_THRESHOLD, ": ", sycl_reduce_scatter_scaleout_direct_threshold);
+    LOG_INFO(CCL_SYCL_REDUCE_SCATTER_SCALEOUT, ": ", (!sycl_reduce_scatter_scaleout_algo.empty()) ? sycl_reduce_scatter_scaleout_algo : CCL_ENV_STR_NOT_SPECIFIED);
 
     LOG_INFO(CCL_SYCL_ALLGATHERV_TMP_BUF, ": ", sycl_allgatherv_tmp_buf);
     LOG_INFO(CCL_SYCL_ALLGATHERV_SMALL_THRESHOLD, ": ", sycl_allgatherv_small_threshold);
@@ -949,7 +990,8 @@ void env_data::print(int rank) {
     LOG_INFO(CCL_SYCL_SCALEOUT_DEVICE_BUF_SIZE, ": ", sycl_scaleout_device_buf_size);
     LOG_INFO(CCL_SYCL_KERNELS_LINE_SIZE, ": ", sycl_kernels_line_size);
     LOG_INFO(CCL_SYCL_SCALEOUT_BUF_ALLOC_MODE, ": ", str_by_enum(ccl::utils::alloc_mode_names, sycl_scaleout_buf_alloc_mode));
-    LOG_INFO(CCL_SYCL_PIPELINE_CHUNK_SIZE, ": ", sycl_pipeline_chunk_size);
+    LOG_INFO(CCL_SYCL_MAX_PIPELINE_CHUNK_SIZE, ": ", sycl_max_pipeline_chunk_size);
+    LOG_INFO(CCL_SYCL_PIPELINE_CHUNK_SIZE, ": ", (sycl_pipeline_chunk_size != CCL_ENV_SIZET_NOT_SPECIFIED) ? std::to_string(sycl_pipeline_chunk_size) : CCL_ENV_STR_NOT_SPECIFIED);
     LOG_INFO(CCL_SYCL_ENABLE_PIPELINE_GPU_RDMA, ": ", sycl_enable_pipeline_gpu_rdma);
     LOG_INFO(CCL_SYCL_ENABLE_DIRECT_GPU_RDMA, ": ", sycl_enable_direct_gpu_rdma);
     LOG_INFO(CCL_SYCL_SUB_COMMUICATOR, ": ", sycl_sub_communicator);
@@ -1002,6 +1044,13 @@ void env_data::print(int rank) {
              ": ",
              (!ofi_lib_path.empty()) ? ofi_lib_path : CCL_ENV_STR_NOT_SPECIFIED);
 
+#if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE) && defined(CCL_ENABLE_UMF)
+    LOG_INFO(CCL_UMF_ENABLE, ": ", umf_enable);
+    LOG_INFO(CCL_UMF_LIBRARY_PATH,
+             ": ",
+             (!umf_lib_path.empty()) ? umf_lib_path : CCL_ENV_STR_NOT_SPECIFIED);
+#endif // CCL_ENABLE_SYCL && CCL_ENABLE_ZE && CCL_ENABLE_UMF
+
 #ifdef CCL_ENABLE_SYCL
     LOG_INFO(CCL_TOPO_ALGO, ": ", enable_topo_algo);
     LOG_INFO(CCL_TOPO_COLOR, ": ", str_by_enum(topo_color_names, topo_color));
@@ -1012,6 +1061,8 @@ void env_data::print(int rank) {
 
     LOG_INFO(CCL_TOPO_FABRIC_VERTEX_CONNECTION_CHECK, ": ", enable_fabric_vertex_connection_check);
     LOG_INFO(CCL_TOPO_WA_FABRIC_VERTEX_CONNECTION_CHECK, ": ", enable_wa_fabric_vertex_connection_check);
+    LOG_INFO(CCL_USE_MPI_BCAST_WA, ": ", use_mpi_bcast_wa);
+    LOG_INFO(CCL_USE_ROOT_PRINT_WA, ": ", use_root_print_wa);
     LOG_INFO(
         CCL_KERNEL_PATH, ": ", (!kernel_path.empty()) ? kernel_path : CCL_ENV_STR_NOT_SPECIFIED);
     LOG_INFO(CCL_KERNEL_DEBUG, ": ", kernel_debug);
@@ -1086,6 +1137,7 @@ void env_data::print(int rank) {
     LOG_INFO(CCL_DRMFD_DEV_RENDER_DIR_PATH, ": ", drmfd_dev_render_dir_path);
     LOG_INFO(CCL_DRMFD_DEV_RENDER_SUFFIX, ": ", drmfd_dev_render_suffix);
 #endif // CCL_ENABLE_SYCL
+    LOG_INFO(CCL_IPC_ALLGATHERV_WA, ": ", ipc_allgatherv_wa);
 
 #ifdef CCL_ENABLE_PMIX
     LOG_INFO(CCL_PMIX_LIBRARY_PATH,
@@ -1212,6 +1264,8 @@ int env_data::parse_affinity(const std::string& input,
 
     output.clear();
 
+    bool list_too_long = false;
+
     while (input_str) {
         range_str = strsep(&input_str, ",");
         if (!range_str) {
@@ -1246,32 +1300,34 @@ int env_data::parse_affinity(const std::string& input,
                       ", first value should be less or equal to last value");
             return 0;
         }
-        const size_t num_values_in_range = last_value - first_value + 1;
-        if (num_values_in_range > expected_output_size) {
-            LOG_ERROR("affinity list too long, a range [",
-                      first_value,
-                      "-",
-                      last_value,
-                      "] contains ",
-                      num_values_in_range,
-                      " elements, affinity list is expected to contain ",
-                      expected_output_size,
-                      " elements in total");
-            return 0;
-        }
 
         for (idx = first_value; idx <= last_value; idx++) {
-            output.push_back(idx);
+            if (output.size() < expected_output_size) {
+                output.push_back(idx);
+            }
+            else {
+                list_too_long = true;
+                input_str = nullptr;
+                break;
+            }
         }
     }
 
-    if (output.size() != expected_output_size) {
+    if (output.size() < expected_output_size) {
         LOG_ERROR("unexpected number of values in input: ",
                   input,
-                  ", expected ",
+                  ", expected at least ",
                   expected_output_size,
                   " values");
         return 0;
+    }
+
+    if (list_too_long) {
+        LOG_WARN("unexpected number of values in input: ",
+                 input,
+                 ", expected ",
+                 expected_output_size,
+                 " values; input truncated to match the expected size`");
     }
 
     return 1;

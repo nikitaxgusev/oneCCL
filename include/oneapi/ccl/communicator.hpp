@@ -95,7 +95,7 @@ public:
      */
     context get_context() const;
 
-    communicator split(const comm_split_attr& attr);
+    communicator split(int color, int key, bool split_external_use = false);
 
 private:
     friend class ccl::detail::environment;
@@ -115,6 +115,13 @@ private:
         shared_ptr_class<kvs_interface> kvs);
 
     template <class DeviceType, class ContextType>
+    static vector_class<communicator> create_communicatorsExt(
+        int comm_size,
+        const vector_class<DeviceType>& local_devices,
+        const ContextType& context,
+        shared_ptr_class<kvs_interface> kvs);
+
+    template <class DeviceType, class ContextType>
     static vector_class<communicator> create_communicators(
         int comm_size,
         const vector_class<pair_class<int, DeviceType>>& local_rank_device_map,
@@ -122,7 +129,21 @@ private:
         shared_ptr_class<kvs_interface> kvs);
 
     template <class DeviceType, class ContextType>
+    static vector_class<communicator> create_communicatorsExt(
+        int comm_size,
+        const vector_class<pair_class<int, DeviceType>>& local_rank_device_map,
+        const ContextType& context,
+        shared_ptr_class<kvs_interface> kvs);
+
+    template <class DeviceType, class ContextType>
     static vector_class<communicator> create_communicators(
+        int comm_size,
+        const map_class<int, DeviceType>& local_rank_device_map,
+        const ContextType& context,
+        shared_ptr_class<kvs_interface> kvs);
+
+    template <class DeviceType, class ContextType>
+    static vector_class<communicator> create_communicatorsExt(
         int comm_size,
         const map_class<int, DeviceType>& local_rank_device_map,
         const ContextType& context,
@@ -136,6 +157,7 @@ private:
                                             int rank,
                                             shared_ptr_class<kvs_interface> kvs,
                                             const comm_attr& attr);
+    static communicator split_communicator(const communicator& comm, int color, int key);
 };
 
 } // namespace v1

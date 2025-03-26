@@ -266,13 +266,18 @@ constexpr const char* CCL_SYCL_ALLREDUCE_MEDIUM_THRESHOLD = "CCL_SYCL_ALLREDUCE_
 constexpr const char* CCL_SYCL_ALLREDUCE_SCALEOUT_THRESHOLD = "CCL_SYCL_ALLREDUCE_SCALEOUT_THRESHOLD";
 
 /**
- * @brief Specify the maximum threshold for the Allreduce Sycl scale-out direct algorithm
+ * @brief Specify allreduce SYCL scale-out algorithm
  *
- * @details Set the threshold in bytes to specify the Sycl scaleout direct algorithm (call MPI_allreduce
- * directly) in the allreduce collective. Default value is 1048576. "<value>"" : ">=0"
+ * @details Set the algorithm string from a list of available algorithms to set 
+ * a specific algorithm for scale-out phase.
+ * ALLREDUCE algorithms
+ * - auto           Automatic selection. Default vaue.
+ * - direct         Based on MPI_Iallreduce
+ * - rabenseifner   Rabenseifner’s algorithm
+ * - ring           Reduce_scatter + allgather ring
  *
  */
-constexpr const char* CCL_SYCL_ALLREDUCE_SCALEOUT_DIRECT_THRESHOLD = "CCL_SYCL_ALLREDUCE_SCALEOUT_DIRECT_THRESHOLD";
+constexpr const char* CCL_SYCL_ALLREDUCE_SCALEOUT = "CCL_SYCL_ALLREDUCE_SCALEOUT";
 
 /**
  * @brief Enable the use of persistent temporary buffer in reduce_scatter
@@ -314,6 +319,19 @@ constexpr const char* CCL_SYCL_REDUCE_SCATTER_MEDIUM_THRESHOLD = "CCL_SYCL_REDUC
  *
  */
 constexpr const char* CCL_SYCL_REDUCE_SCATTER_SCALEOUT_THRESHOLD = "CCL_SYCL_REDUCE_SCATTER_SCALEOUT_THRESHOLD";
+
+/**
+ * @brief Specify reduce-scatter SYCL scale-out algorithm
+ *
+ * @details Set the algorithm string from a list of available algorithms to set
+ * a specific algorithm for scale-out phase.
+ * REDUCE_SCATTER algorithms
+ * - auto           Automatic selection. Default vaue.
+ * - direct         Based on MPI_Ireduce_scatter
+ * - ring           Ring algorithm
+ *
+ */
+constexpr const char* CCL_SYCL_REDUCE_SCATTER_SCALEOUT = "CCL_SYCL_REDUCE_SCATTER_SCALEOUT";
 /** @} */
 /** @} */
 
@@ -348,9 +366,9 @@ constexpr const char* CCL_SYCL_FULL_VECTOR = "CCL_SYCL_FULL_VECTOR";
 constexpr const char* CCL_SYCL_TMP_BUF_SIZE = "CCL_SYCL_TMP_BUF_SIZE";
 constexpr const char* CCL_SYCL_SCALEOUT_HOST_BUF_SIZE = "CCL_SYCL_SCALEOUT_HOST_BUF_SIZE";
 constexpr const char* CCL_SYCL_SCALEOUT_DEVICE_BUF_SIZE = "CCL_SYCL_SCALEOUT_DEVICE_BUF_SIZE";
-constexpr const char* CCL_SYCL_REDUCE_SCATTER_SCALEOUT_DIRECT_THRESHOLD = "CCL_SYCL_REDUCE_SCATTER_SCALEOUT_DIRECT_THRESHOLD";
 constexpr const char* CCL_SYCL_KERNELS_LINE_SIZE = "CCL_SYCL_KERNELS_LINE_SIZE";
 constexpr const char* CCL_SYCL_SCALEOUT_BUF_ALLOC_MODE = "CCL_SYCL_SCALEOUT_BUF_ALLOC_MODE";
+constexpr const char* CCL_SYCL_MAX_PIPELINE_CHUNK_SIZE = "CCL_SYCL_MAX_PIPELINE_CHUNK_SIZE";
 constexpr const char* CCL_SYCL_PIPELINE_CHUNK_SIZE = "CCL_SYCL_PIPELINE_CHUNK_SIZE";
 constexpr const char* CCL_SYCL_ENABLE_PIPELINE_GPU_RDMA = "CCL_SYCL_ENABLE_PIPELINE_GPU_RDMA";
 constexpr const char* CCL_SYCL_ENABLE_DIRECT_GPU_RDMA = "CCL_SYCL_ENABLE_DIRECT_GPU_RDMA";
@@ -365,4 +383,10 @@ constexpr const char* CCL_SYCL_ENABLE_DIRECT_GPU_RDMA = "CCL_SYCL_ENABLE_DIRECT_
  */
 constexpr const char* CCL_SYCL_SUB_COMMUICATOR = "CCL_SYCL_SUB_COMMUICATOR";
 
+#if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE) && defined(CCL_ENABLE_UMF)
+constexpr const char* CCL_UMF_ENABLE = "CCL_UMF_ENABLE";
+constexpr const char* CCL_UMF_LIBRARY_PATH = "CCL_UMF_LIBRARY_PATH";
+#endif // CCL_ENABLE_SYCL && CCL_ENABLE_ZE && CCL_ENABLE_UMF
 #endif // CCL_ENABLE_SYCL
+
+constexpr const char* CCL_IPC_ALLGATHERV_WA = "CCL_IPC_ALLGATHERV_WA";

@@ -28,6 +28,7 @@ ccl::event allreduce_large_read_write_ipc(const void *send_buf,
                                           ccl::reduction reduction,
                                           ccl_comm *comm,
                                           ccl_stream *global_stream,
+                                          sycl_ptrs_type &sycl_ptrs,
                                           const ccl::vector_class<ccl::event> &deps,
                                           const bool is_single_plane) {
     auto ccl_dtype = ccl::global_data::get().dtypes->get(dtype);
@@ -36,6 +37,7 @@ ccl::event allreduce_large_read_write_ipc(const void *send_buf,
     const bool is_cpu_barrier = ccl::global_data::env().sycl_ccl_barrier;
     const bool is_use_tmp = ccl::global_data::env().sycl_allreduce_tmp_buf;
     std::shared_ptr<ccl_comm> node_comm = comm->get_node_comm();
+    const int node_comm_size = node_comm->size();
 
     CCL_THROW_IF_NOT(
         node_comm->size() == N,
@@ -65,10 +67,12 @@ ccl::event allreduce_large_read_write_ipc(const void *send_buf,
             dst_ptrs[idx] = (char *)recv_buf + offset_rank;
         }
         else {
-            src_ptrs[idx] =
-                (is_single_plane ? (char *)xelink_ptrs_rd[idx] : (char *)mdfi_ptr_rd) + offset_rank;
-            dst_ptrs[idx] =
-                (is_single_plane ? (char *)xelink_ptrs_wr[idx] : (char *)mdfi_ptr_wr) + offset_rank;
+            src_ptrs[idx] = (is_single_plane ? (char *)sycl_ptrs.xelink_ptrs_rd[idx]
+                                             : (char *)sycl_ptrs.mdfi_ptr_rd) +
+                            offset_rank;
+            dst_ptrs[idx] = (is_single_plane ? (char *)sycl_ptrs.xelink_ptrs_wr[idx]
+                                             : (char *)sycl_ptrs.mdfi_ptr_wr) +
+                            offset_rank;
         }
     }
 
@@ -87,7 +91,7 @@ ccl::event allreduce_large_read_write_ipc(const void *send_buf,
 
         h.parallel_for(
             sycl::nd_range<1>(kernel_size, work_group_size),
-            [=](sycl::nd_item<1> it) [[intel::reqd_sub_group_size(sub_group_size)]] {
+            [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(sub_group_size)]] {
                 reduce_sum<T, N, vec_size, 1, 0, 0, 0>(nullptr,
                                                        nullptr,
                                                        nullptr,
@@ -100,6 +104,20 @@ ccl::event allreduce_large_read_write_ipc(const void *send_buf,
             });
     });
     barrier_event = invoke_barrier(node_comm, q, { work_event }, is_cpu_barrier);
+
+    // do the average reduction separately after sum
+    if (reduction == ccl::reduction::avg) {
+        // set dependencies
+        std::vector<sycl::event> avg_deps_evs;
+        avg_deps_evs.push_back(barrier_event);
+
+        LOG_DEBUG("allreduce_large_ipc calculate average on counts: ",
+                  count,
+                  ", ranks: ",
+                  node_comm_size);
+        barrier_event = sycl_average(q, recv_buf, count, node_comm_size, dtype, avg_deps_evs);
+    }
+
     return ccl::event::create_from_native(barrier_event);
 }
 
@@ -111,6 +129,7 @@ ccl::event allreduce_large_read_write_tmp(const void *send_buf,
                                           ccl::reduction reduction,
                                           ccl_comm *comm,
                                           ccl_stream *global_stream,
+                                          sycl_ptrs_type &sycl_ptrs,
                                           const ccl::vector_class<ccl::event> &deps,
                                           const bool is_single_plane) {
     auto ccl_dtype = ccl::global_data::get().dtypes->get(dtype);
@@ -120,14 +139,14 @@ ccl::event allreduce_large_read_write_tmp(const void *send_buf,
 
     std::shared_ptr<ccl_comm> node_comm = comm->get_node_comm();
     const int node_comm_size = node_comm->size();
+    const int rank = node_comm->rank();
     CCL_THROW_IF_NOT(
         node_comm->size() == N,
         "SYCL allreduce read write algo implemented for single plane or single GPU cases");
-    const int rank = node_comm->rank();
 
     std::array<void *, MAX_NODE_RANKS> l_src_ptrs, l_dst_ptrs;
-    void *src_tmp_ptr = get_tmp_buf(1);
-    void *dst_tmp_ptr = get_tmp_buf(2);
+    void *src_tmp_ptr = get_tmp_buf(1, comm);
+    void *dst_tmp_ptr = get_tmp_buf(2, comm);
 
     std::vector<sycl::event> dep_events = get_sycl_events(deps);
     std::vector<sycl::event> memcpy_events;
@@ -164,12 +183,12 @@ ccl::event allreduce_large_read_write_tmp(const void *send_buf,
                 l_dst_ptrs[idx] = (char *)dst_tmp_ptr + offset_rank;
             }
             else {
-                l_src_ptrs[idx] =
-                    (is_single_plane ? (char *)xelink_ptrs_rd[idx] : (char *)mdfi_ptr_rd) +
-                    offset_rank;
-                l_dst_ptrs[idx] =
-                    (is_single_plane ? (char *)xelink_ptrs_wr[idx] : (char *)mdfi_ptr_wr) +
-                    offset_rank;
+                l_src_ptrs[idx] = (is_single_plane ? (char *)sycl_ptrs.xelink_ptrs_rd[idx]
+                                                   : (char *)sycl_ptrs.mdfi_ptr_rd) +
+                                  offset_rank;
+                l_dst_ptrs[idx] = (is_single_plane ? (char *)sycl_ptrs.xelink_ptrs_wr[idx]
+                                                   : (char *)sycl_ptrs.mdfi_ptr_wr) +
+                                  offset_rank;
             }
         }
 
@@ -202,7 +221,7 @@ ccl::event allreduce_large_read_write_tmp(const void *send_buf,
 
             h.parallel_for(
                 sycl::nd_range<1>(kernel_size, work_group_size),
-                [=](sycl::nd_item<1> it) [[intel::reqd_sub_group_size(sub_group_size)]] {
+                [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(sub_group_size)]] {
                     reduce_sum<T, N, vec_size, 1, 0, 0, 0>(nullptr,
                                                            nullptr,
                                                            nullptr,
@@ -226,6 +245,19 @@ ccl::event allreduce_large_read_write_tmp(const void *send_buf,
         }
     }
 
+    // do the average reduction separately after sum
+    if (reduction == ccl::reduction::avg) {
+        // set dependencies
+        std::vector<sycl::event> avg_deps_evs;
+        avg_deps_evs.push_back(memcpy_event);
+
+        LOG_DEBUG("allreduce_large_tmp calculate average on counts: ",
+                  count,
+                  ", ranks: ",
+                  node_comm_size);
+        memcpy_event = sycl_average(q, recv_buf, count, node_comm_size, dtype, avg_deps_evs);
+    }
+
     return ccl::event::create_from_native(memcpy_event);
 }
 
@@ -239,13 +271,13 @@ ccl::event allreduce_large_impl(const void *send_buf,
                                 ccl::reduction reduction,
                                 ccl_comm *comm,
                                 ccl_stream *global_stream,
+                                sycl_ptrs_type &sycl_ptrs,
                                 const ccl::vector_class<ccl::event> &deps) {
     constexpr int N = NE;
     auto ccl_dtype = ccl::global_data::get().dtypes->get(dtype);
     const int dsize = ccl_dtype.size();
     sycl::queue q = global_stream->get_native_stream();
     sycl::queue q_use = q;
-
     const bool is_use_tmp = ccl::global_data::env().sycl_allreduce_tmp_buf;
     const bool is_cpu_barrier = ccl::global_data::env().sycl_ccl_barrier;
 
@@ -264,7 +296,6 @@ ccl::event allreduce_large_impl(const void *send_buf,
     const bool is_use_rw_opt = is_single_gpu || is_single_plane;
 
     constexpr int pipeline_size = 2;
-    constexpr bool subgroup_api = false;
     constexpr int vec_size = get_num_elements<T, 8, use_full_vector>();
     const size_t work_group_size = 16;
 
@@ -274,24 +305,61 @@ ccl::event allreduce_large_impl(const void *send_buf,
             // For more than 2 ranks, the performance of RW algo with TMP buffer
             // is slightly worse than pipelined implementation
             if (is_single_gpu) {
-                return allreduce_large_read_write_tmp<T, NP, vec_size>(
-                    send_buf, recv_buf, count, dtype, reduction, comm, global_stream, deps, false);
+                return allreduce_large_read_write_tmp<T, NP, vec_size>(send_buf,
+                                                                       recv_buf,
+                                                                       count,
+                                                                       dtype,
+                                                                       reduction,
+                                                                       comm,
+                                                                       global_stream,
+                                                                       sycl_ptrs,
+                                                                       deps,
+                                                                       false);
             }
             if (is_single_plane) {
-                return allreduce_large_read_write_tmp<T, NE, vec_size>(
-                    send_buf, recv_buf, count, dtype, reduction, comm, global_stream, deps, true);
+                return allreduce_large_read_write_tmp<T, NE, vec_size>(send_buf,
+                                                                       recv_buf,
+                                                                       count,
+                                                                       dtype,
+                                                                       reduction,
+                                                                       comm,
+                                                                       global_stream,
+                                                                       sycl_ptrs,
+                                                                       deps,
+                                                                       true);
             }
         }
         if (!is_use_tmp) {
             if (is_single_gpu) {
-                return allreduce_large_read_write_ipc<T, NP, vec_size>(
-                    send_buf, recv_buf, count, dtype, reduction, comm, global_stream, deps, false);
+                return allreduce_large_read_write_ipc<T, NP, vec_size>(send_buf,
+                                                                       recv_buf,
+                                                                       count,
+                                                                       dtype,
+                                                                       reduction,
+                                                                       comm,
+                                                                       global_stream,
+                                                                       sycl_ptrs,
+                                                                       deps,
+                                                                       false);
             }
             if (is_single_plane) {
-                return allreduce_large_read_write_ipc<T, NE, vec_size>(
-                    send_buf, recv_buf, count, dtype, reduction, comm, global_stream, deps, true);
+                return allreduce_large_read_write_ipc<T, NE, vec_size>(send_buf,
+                                                                       recv_buf,
+                                                                       count,
+                                                                       dtype,
+                                                                       reduction,
+                                                                       comm,
+                                                                       global_stream,
+                                                                       sycl_ptrs,
+                                                                       deps,
+                                                                       true);
             }
         }
+    }
+
+    if (comm->is_multi_thread_instance() == true) {
+        pthread_barrier_wait(
+            &ccl::global_data::get().shared_data->barrier_waits[comm->global_current_id]);
     }
 
     std::array<void *, MAX_GPUS> l_mdfi_send_ptrs, l_xelink_work_wr_ptrs, l_send_ptrs,
@@ -318,15 +386,15 @@ ccl::event allreduce_large_impl(const void *send_buf,
     const size_t num_chunks = recv_bytes / chunk_size + (rem_chunk_size != 0 || rem_count != 0);
     const size_t pipeline_offset = chunk_size * even_comm_size;
 
-    void *tmp_bufs_send[pipeline_size] = { get_tmp_buf(1),
-                                           (char *)get_tmp_buf(1) + pipeline_offset };
-    void *tmp_bufs_recv[pipeline_size] = { get_tmp_buf(2),
-                                           (char *)get_tmp_buf(2) + pipeline_offset };
+    void *tmp_bufs_send[pipeline_size] = { get_tmp_buf(1, comm),
+                                           (char *)get_tmp_buf(1, comm) + pipeline_offset };
+    void *tmp_bufs_recv[pipeline_size] = { get_tmp_buf(2, comm),
+                                           (char *)get_tmp_buf(2, comm) + pipeline_offset };
     std::array<void *, MAX_GPUS> xelink_work_bufs_wr[pipeline_size],
         xelink_work_bufs_rd[pipeline_size], work_bufs[pipeline_size];
 
-    xelink_work_bufs_rd[0] = get_remote_even_tmp_buf(0);
-    void *work_buf = get_tmp_buf(0);
+    xelink_work_bufs_rd[0] = get_remote_even_tmp_buf(0, comm);
+    void *work_buf = get_tmp_buf(0, comm);
     for (int i = 0; i < even_comm_size; i++) {
         work_bufs[0][i] = (char *)work_buf + chunk_size * i;
         work_bufs[1][i] = (char *)(work_bufs[0][i]) + pipeline_offset;
@@ -337,16 +405,14 @@ ccl::event allreduce_large_impl(const void *send_buf,
     }
 
     //TODO : update the algorithm to not use node_send_ptrs
-    // find end ptrs that comes after aligned data
     if (rem_count != 0) {
-        l_send_ptrs_rem[0] = get_tmp_buf(2);
+        l_send_ptrs_rem[0] = get_tmp_buf(2, comm);
         l_recv_ptr = (char *)recv_buf + pack_count * dsize;
-        l_node_send_ptrs = get_remote_node_tmp_buf(2);
+        l_node_send_ptrs = get_remote_node_tmp_buf(2, comm);
     }
 
     std::vector<sycl::event> dep_events = get_sycl_events(deps);
     sycl::event work_event;
-
     for (size_t nc = 0; nc < num_chunks; nc++) {
         const int pipeline_index = nc % pipeline_size;
         const int pipeline_index_next = (nc + 1) % pipeline_size;
@@ -358,9 +424,10 @@ ccl::event allreduce_large_impl(const void *send_buf,
             ((nc + 1 < recv_bytes / chunk_size) ? chunk_size : rem_chunk_size) / dsize;
         const size_t data_count_prev = chunk_size / dsize;
         const size_t data_count_prev_2 = chunk_size / dsize;
-
         for (int i = 0; i < even_comm_size; i++) {
-            int global_rank = even_comm->get_node_rank(i);
+            int global_rank = comm->is_multi_thread_instance()
+                                  ? i * pair_comm_size + pair_comm->rank()
+                                  : even_comm->get_node_rank(i);
             // TODO: is there a better way to find the pair_neighbor global rank
             int global_rank_neighbor = (global_rank / pair_comm_size) * pair_comm_size;
             if (global_rank % pair_comm_size == 0) {
@@ -373,7 +440,6 @@ ccl::event allreduce_large_impl(const void *send_buf,
             const size_t offset_neigh = global_rank_neighbor * recv_bytes + chunk_offset;
             const size_t offset_tmp = i * chunk_size;
             const size_t mdfi_offset_tmp = pipeline_index * pipeline_offset + offset_tmp;
-
             l_send_cp_src_ptrs[i] = (char *)send_buf + offset_neigh;
             l_send_cp_dst_ptrs[i] = (char *)tmp_bufs_send[pipeline_index] + offset_tmp;
 
@@ -381,7 +447,8 @@ ccl::event allreduce_large_impl(const void *send_buf,
             l_send_cp_dst_ptrs_next[i] = (char *)tmp_bufs_send[pipeline_index_next] + offset_tmp;
 
             // read_reduce_write
-            l_mdfi_send_ptrs[i] = (char *)mdfi_ptr_rd + (is_use_tmp ? mdfi_offset_tmp : offset);
+            l_mdfi_send_ptrs[i] =
+                (char *)sycl_ptrs.mdfi_ptr_rd + (is_use_tmp ? mdfi_offset_tmp : offset);
             l_send_ptrs[i] = (char *)send_buf + offset;
             l_xelink_work_wr_ptrs[i] = (char *)xelink_work_bufs_wr[pipeline_index][i];
 
@@ -391,11 +458,13 @@ ccl::event allreduce_large_impl(const void *send_buf,
             // read_write
             l_xelink_work_rd_ptrs[i] = (char *)xelink_work_bufs_rd[pipeline_index][i];
             l_recv_ptrs[i] = (char *)recv_buf + offset;
-            l_mdfi_recv_ptrs[i] = (char *)mdfi_ptr_wr + (is_use_tmp ? mdfi_offset_tmp : offset);
+            l_mdfi_recv_ptrs[i] =
+                (char *)sycl_ptrs.mdfi_ptr_wr + (is_use_tmp ? mdfi_offset_tmp : offset);
 
             l_recv_cp_src_ptrs[i] = (char *)tmp_bufs_recv[pipeline_index] + offset_tmp;
             l_recv_cp_dst_ptrs[i] = (char *)recv_buf + offset_neigh;
         }
+
         // reduce_sum
         l_reduce_sum_dst = is_use_tmp
                                ? l_work_ptrs[0]
@@ -406,6 +475,7 @@ ccl::event allreduce_large_impl(const void *send_buf,
         // this data copy can also be done from the main kernel as first step with a guard of nc == 0
         if (is_use_tmp && nc == 0 && is_multi_tile) {
             is_deps_added = true;
+
             work_event = q_use.submit([=](sycl::handler &h) {
                 const size_t kernel_threads_curr = data_count / vec_size + data_count % vec_size;
                 const size_t kernel_threads_rem = rem_count / vec_size + rem_count % vec_size;
@@ -418,12 +488,12 @@ ccl::event allreduce_large_impl(const void *send_buf,
                 l_send_buf_pack_ptr[0] = (char *)send_buf + pack_count * dsize;
                 h.parallel_for(
                     sycl::nd_range<1>(kernel_size, work_group_size),
-                    [=](sycl::nd_item<1> it) [[intel::reqd_sub_group_size(work_group_size)]] {
+                    [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(work_group_size)]] {
                         // copy first chunk from send buf to tmp buf
-                        copy_data<T, N, vec_size, subgroup_api>(
+                        copy_data<T, N, vec_size>(
                             l_send_cp_dst_ptrs, l_send_cp_src_ptrs, data_count, it);
                         // copy the tail unaligned data from send buf to tmp buf's next offset
-                        copy_data<T, 1, vec_size, subgroup_api>(
+                        copy_data<T, 1, vec_size>(
                             l_send_ptrs_rem, l_send_buf_pack_ptr, rem_count, it);
                     });
             });
@@ -446,7 +516,10 @@ ccl::event allreduce_large_impl(const void *send_buf,
             barrier_deps.push_back(work_event);
         }
         work_event = invoke_barrier(node_comm, q_use, barrier_deps, is_cpu_barrier);
-
+        if (comm->is_multi_thread_instance() == true) {
+            pthread_barrier_wait(
+                &ccl::global_data::get().shared_data->barrier_waits[comm->global_current_id]);
+        }
         work_event = q_use.submit([=](sycl::handler &h) {
             const size_t kernel_threads_curr = data_count / vec_size + data_count % vec_size;
             const size_t kernel_threads_prev =
@@ -471,7 +544,7 @@ ccl::event allreduce_large_impl(const void *send_buf,
 
             h.parallel_for(
                 sycl::nd_range<1>(kernel_size, work_group_size),
-                [=](sycl::nd_item<1> it) [[intel::reqd_sub_group_size(work_group_size)]] {
+                [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(work_group_size)]] {
                     read_reduce_write<T, N, vec_size>(l_mdfi_send_ptrs,
                                                       l_send_ptrs,
                                                       l_xelink_work_wr_ptrs,
@@ -493,7 +566,7 @@ ccl::event allreduce_large_impl(const void *send_buf,
                     }
 
                     if (is_use_tmp && nc < num_chunks - 1 && is_multi_tile) {
-                        copy_data<T, N, vec_size, subgroup_api>(
+                        copy_data<T, N, vec_size>(
                             l_send_cp_dst_ptrs_next, l_send_cp_src_ptrs_next, data_count_next, it);
                     }
 
@@ -513,7 +586,6 @@ ccl::event allreduce_large_impl(const void *send_buf,
                     }
                 });
         });
-
         // when tmp_buf used, perform chunked allgatherv
         if (is_use_tmp && nc > 0) {
             const size_t kernel_threads_prev =
@@ -533,24 +605,23 @@ ccl::event allreduce_large_impl(const void *send_buf,
 
                 h.parallel_for(
                     sycl::nd_range<1>(kernel_size, work_group_size),
-                    [=](sycl::nd_item<1> it) [[intel::reqd_sub_group_size(work_group_size)]] {
-                        read_write<T, N, vec_size, subgroup_api>(l_xelink_work_rd_ptrs_prev,
-                                                                 l_recv_ptrs_prev,
-                                                                 l_mdfi_recv_ptrs_prev,
-                                                                 is_multi_tile,
-                                                                 data_count_prev,
-                                                                 it);
+                    [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(work_group_size)]] {
+                        read_write<T, N, vec_size>(l_xelink_work_rd_ptrs_prev,
+                                                   l_recv_ptrs_prev,
+                                                   l_mdfi_recv_ptrs_prev,
+                                                   is_multi_tile,
+                                                   data_count_prev,
+                                                   it);
 
                         if (nc > 1 && is_multi_tile) {
-                            copy_data<T, N, vec_size, subgroup_api>(l_recv_cp_dst_ptrs_prev_2,
-                                                                    l_recv_cp_src_ptrs,
-                                                                    data_count_prev_2,
-                                                                    it);
+                            copy_data<T, N, vec_size>(l_recv_cp_dst_ptrs_prev_2,
+                                                      l_recv_cp_src_ptrs,
+                                                      data_count_prev_2,
+                                                      it);
                         }
                     });
             });
         }
-
         // save prev pointers to be used in next iteration
         for (int i = 0; i < even_comm_size; i++) {
             l_work_ptrs_prev[i] = l_work_ptrs[i];
@@ -565,7 +636,6 @@ ccl::event allreduce_large_impl(const void *send_buf,
             l_recv_cp_dst_ptrs_prev[i] = l_recv_cp_dst_ptrs[i];
         }
         l_reduce_sum_dst_prev = l_reduce_sum_dst;
-
         // pipeline epilogue
         // this reduction can also be done from the main kernel as last step with a guard of nc == num_chunks - 1
         if (nc == num_chunks - 1) {
@@ -591,7 +661,7 @@ ccl::event allreduce_large_impl(const void *send_buf,
 
                 h.parallel_for(
                     sycl::nd_range<1>(kernel_size, work_group_size),
-                    [=](sycl::nd_item<1> it) [[intel::reqd_sub_group_size(work_group_size)]] {
+                    [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(work_group_size)]] {
                         reduce_sum<T, N, vec_size, 1, 0, 0>(nullptr,
                                                             l_reduce_sum_dst,
                                                             nullptr,
@@ -603,7 +673,6 @@ ccl::event allreduce_large_impl(const void *send_buf,
                                                             it);
                     });
             });
-
             // when tmp_buf used, perform chunked allgatherv
             if (is_use_tmp) {
                 work_event = invoke_barrier(node_comm, q_use, { work_event }, is_cpu_barrier);
@@ -613,18 +682,18 @@ ccl::event allreduce_large_impl(const void *send_buf,
 
                     h.parallel_for(
                         sycl::nd_range<1>(kernel_size_rw, work_group_size),
-                        [=](sycl::nd_item<1> it) [[intel::reqd_sub_group_size(work_group_size)]] {
-                            read_write<T, N, vec_size, subgroup_api>(l_xelink_work_rd_ptrs,
-                                                                     l_recv_ptrs,
-                                                                     l_mdfi_recv_ptrs,
-                                                                     is_multi_tile,
-                                                                     data_count,
-                                                                     it);
+                        [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(work_group_size)]] {
+                            read_write<T, N, vec_size>(l_xelink_work_rd_ptrs,
+                                                       l_recv_ptrs,
+                                                       l_mdfi_recv_ptrs,
+                                                       is_multi_tile,
+                                                       data_count,
+                                                       it);
                             if (nc > 0 && is_multi_tile) {
-                                copy_data<T, N, vec_size, subgroup_api>(l_recv_cp_dst_ptrs_prev_2,
-                                                                        l_recv_cp_src_ptrs_prev_2,
-                                                                        data_count_prev,
-                                                                        it);
+                                copy_data<T, N, vec_size>(l_recv_cp_dst_ptrs_prev_2,
+                                                          l_recv_cp_src_ptrs_prev_2,
+                                                          data_count_prev,
+                                                          it);
                             }
                         });
                 });
@@ -637,8 +706,8 @@ ccl::event allreduce_large_impl(const void *send_buf,
                         h.parallel_for(
                             sycl::nd_range<1>(kernel_size, work_group_size),
                             [=](sycl::nd_item<1> it)
-                                [[intel::reqd_sub_group_size(work_group_size)]] {
-                                    copy_data<T, N, vec_size, subgroup_api>(
+                                [[sycl::reqd_sub_group_size(work_group_size)]] {
+                                    copy_data<T, N, vec_size>(
                                         l_recv_cp_dst_ptrs, l_recv_cp_src_ptrs, data_count, it);
                                 });
                     });
@@ -646,7 +715,6 @@ ccl::event allreduce_large_impl(const void *send_buf,
             }
         }
     }
-
     // when tmp_buf is not used, perform a non-chunked single-kernel allgatherv
     if (!is_use_tmp) {
         std::array<void *, MAX_GPUS> l_peer_even_ptrs, l_local_ptrs, l_peer_pair_ptrs;
@@ -654,9 +722,9 @@ ccl::event allreduce_large_impl(const void *send_buf,
             // offsets for read_write kernel
             const int global_rank = even_comm->get_node_rank(i);
             const size_t offset_bytes = recv_bytes * global_rank;
-            l_peer_even_ptrs[i] = (char *)xelink_ptrs_wr[i] + offset_bytes;
+            l_peer_even_ptrs[i] = (char *)sycl_ptrs.xelink_ptrs_wr[i] + offset_bytes;
             l_local_ptrs[i] = (char *)recv_buf + offset_bytes;
-            l_peer_pair_ptrs[i] = (char *)mdfi_ptr_wr + offset_bytes;
+            l_peer_pair_ptrs[i] = (char *)sycl_ptrs.mdfi_ptr_wr + offset_bytes;
         }
 
         work_event = invoke_barrier(node_comm, q, { work_event }, is_cpu_barrier);
@@ -669,16 +737,31 @@ ccl::event allreduce_large_impl(const void *send_buf,
 
             h.parallel_for(
                 sycl::nd_range<1>(kernel_size, work_group_size),
-                [=](sycl::nd_item<1> it) [[intel::reqd_sub_group_size(work_group_size)]] {
-                    read_write<T, N, vec_size, subgroup_api>(l_peer_even_ptrs,
-                                                             l_local_ptrs,
-                                                             l_peer_pair_ptrs,
-                                                             is_multi_tile,
-                                                             recv_count,
-                                                             it);
+                [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(work_group_size)]] {
+                    read_write<T, N, vec_size>(l_peer_even_ptrs,
+                                               l_local_ptrs,
+                                               l_peer_pair_ptrs,
+                                               is_multi_tile,
+                                               recv_count,
+                                               it);
                 });
         });
     }
 
+    // do the average reduction separately after sum
+    if (reduction == ccl::reduction::avg) {
+        // set dependencies
+        std::vector<sycl::event> avg_deps_evs;
+        avg_deps_evs.push_back(work_event);
+
+        LOG_DEBUG(
+            "allreduce_large calculate average on counts: ", count, ", ranks: ", node_comm_size);
+        work_event = sycl_average(q, recv_buf, count, node_comm_size, dtype, avg_deps_evs);
+    }
+
+    if (comm->is_multi_thread_instance() == true) {
+        pthread_barrier_wait(
+            &ccl::global_data::get().shared_data->barrier_waits[comm->global_current_id]);
+    }
     return ccl::event::create_from_native(work_event);
 }

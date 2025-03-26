@@ -20,16 +20,15 @@
 
 // sync_ptrs is used for counting in local kernel_barrier
 static ccl_kernel_barrier_data kernel_barrier_data;
+static thread_local ccl_kernel_barrier_data thread_kernel_barrier_data;
 
 // three tmp buffers - 1: work_buf, 2: tmp_send_buf, 3: tmp_recv_buf
 constexpr int tmp_bufs_count = 3;
 // tmp_bufs are used as work buf and to copy input/output
 static std::array<void *, tmp_bufs_count> tmp_bufs;
-// ipc exchanged pointers to remote tmp buffers
-static std::array<void *, MAX_NODE_RANKS> remote_tmp_bufs[tmp_bufs_count];
-static std::array<void *, MAX_GPUS> remote_even_tmp_bufs[tmp_bufs_count];
-static std::array<void *, MAX_TILES> remote_pair_tmp_bufs[tmp_bufs_count];
+static thread_local std::array<void *, tmp_bufs_count> thread_tmp_bufs;
 
+static thread_local bool is_thread_initial_invocation = true;
 size_t tmp_buf_size_per_rank = 0;
 
 std::pair<ccl_sched *, ze_handle_exchange_entry *> do_ipc_exchange(ccl_comm *comm,
@@ -203,12 +202,15 @@ void coll_init(ccl_comm *comm, ccl_stream *global_stream) {
     std::shared_ptr<ccl_comm> node_comm = comm->get_node_comm();
     ccl_comm_barrier_data bd = node_comm->barrier_data();
 
+    sycl::queue q = global_stream->get_native_stream();
+
     // if communicator is used for first time then do ipc exchage
     // to get remote ptrs used for barrier counting and remote tmp bufs
     if (!bd.is_set()) {
         std::shared_ptr<ccl_comm> even_comm = comm->get_even_comm();
         std::shared_ptr<ccl_comm> pair_comm = comm->get_pair_comm();
         std::vector<std::shared_ptr<ccl_comm>> sub_comms{ node_comm, even_comm, pair_comm };
+        ccl_large_tmp_bufs &comm_large_tmp_bufs = node_comm->get_large_tmp_bufs();
 
         sycl::queue q = global_stream->get_native_stream();
         sycl::queue q_worker(q.get_device());
@@ -229,8 +231,12 @@ void coll_init(ccl_comm *comm, ccl_stream *global_stream) {
 
             // allocate sync_ptrs for local kernel barrier
             size_t *sync_ptrs = sycl::malloc_device<size_t>(ccl_kernel_barrier_data::slots, q);
+
+            // Initialize memory to zero using memset
             q.memset(sync_ptrs, 0, ccl_kernel_barrier_data::slots * sizeof(size_t)).wait();
-            get_kernel_barrier_data().set_sync_ptrs(sync_ptrs);
+
+            // Set the sync_ptrs for the kernel barrier data
+            get_kernel_barrier_data(comm).set_sync_ptrs(sync_ptrs);
 
             //set up temp buf to be used for large collectives
             const size_t tmp_buf_size = ccl::global_data::env().sycl_tmp_buf_size / tmp_bufs_count;
@@ -249,6 +255,10 @@ void coll_init(ccl_comm *comm, ccl_stream *global_stream) {
             }
         }
 
+        for (int i = 0; i < tmp_bufs_count; i++) {
+            comm_large_tmp_bufs.tmp_bufs[i] = tmp_bufs[i];
+        }
+
         // set up temp buf to be used for small collectives
         const int small_buf_ipc_idx = ipc_ptrs.size();
         char *tmp_buf = sycl::aligned_alloc_device<char>(
@@ -263,34 +273,72 @@ void coll_init(ccl_comm *comm, ccl_stream *global_stream) {
         const int large_buf_ipc_idx = ipc_ptrs.size();
         ipc_ptrs.insert(std::end(ipc_ptrs), std::begin(tmp_bufs), std::end(tmp_bufs));
 
-        auto [sched, exchange_entry] = do_ipc_exchange(comm, global_stream, ipc_ptrs);
+#ifdef CCL_ENABLE_UMF
+        if (ccl::global_data::env().umf_enable) {
+            LOG_DEBUG("|UMF|: umf_ipc_exchange");
+            umf_ipc_exchange(comm, global_stream, ipc_ptrs);
 
-        // add comm_barrier sync pointers to each communicator
-        for (size_t i = 0; i < sub_comms.size(); i++) {
-            auto remote_ptrs = get_ipc_ptrs<size_t, MAX_NODE_RANKS>(
-                sub_comms[i], i, ipc_ptrs[i], sched, q_worker, 1);
-            sub_comms[i]->set_barrier_ptrs(remote_ptrs);
-        }
-        // get ipc pointers for small tmp buffers and add them to node_comm
-        for (size_t i = 0, j = small_buf_ipc_idx; i < ccl_tmp_bufs::buf_count; i++, j++) {
-            auto remote_ptrs =
-                get_ipc_ptrs<void, MAX_NODE_RANKS>(node_comm, j, ipc_ptrs[j], sched, q_worker, 1);
-            node_comm->set_remote_tmp_bufs(remote_ptrs, i);
-        }
-        // get ipc pointers for large tmp_buffers
-        for (size_t i = 0, j = large_buf_ipc_idx; i < tmp_bufs.size(); i++, j++) {
-            remote_tmp_bufs[i] =
-                get_ipc_ptrs<void, MAX_NODE_RANKS>(node_comm, j, ipc_ptrs[j], sched, q_worker, 1);
-            remote_even_tmp_bufs[i] =
-                get_ipc_ptrs<void, MAX_GPUS>(even_comm, j, ipc_ptrs[j], sched, q_worker, 1);
-            remote_pair_tmp_bufs[i] =
-                get_ipc_ptrs<void, MAX_TILES>(pair_comm, j, ipc_ptrs[j], sched, q_worker, 1);
-        }
+            // add comm_barrier sync pointers to each communicator
+            for (size_t i = 0; i < sub_comms.size(); i++) {
+                auto remote_ptrs = get_ipc_ptrs<size_t, MAX_NODE_RANKS>(
+                    sub_comms[i], i, ipc_ptrs[i], ipc_handle_map, q_worker, q.get_device(), 1);
+                sub_comms[i]->set_barrier_ptrs(remote_ptrs);
+            }
 
-        q_worker.wait();
+            // get ipc pointers for small tmp buffers and add them to node_comm
+            for (size_t i = 0, j = small_buf_ipc_idx; i < ccl_tmp_bufs::buf_count; i++, j++) {
+                auto remote_ptrs = get_ipc_ptrs<void, MAX_NODE_RANKS>(
+                    node_comm, j, ipc_ptrs[j], ipc_handle_map, q_worker, q.get_device(), 1);
+                node_comm->set_remote_tmp_bufs(remote_ptrs, i);
+            }
 
-        delete exchange_entry;
-        delete sched;
+            for (size_t i = 0, j = large_buf_ipc_idx; i < tmp_bufs.size(); i++, j++) {
+                comm_large_tmp_bufs.remote_tmp_bufs[i] = get_ipc_ptrs<void, MAX_NODE_RANKS>(
+                    node_comm, j, ipc_ptrs[j], ipc_handle_map, q_worker, q.get_device(), 1);
+                comm_large_tmp_bufs.remote_even_tmp_bufs[i] = get_ipc_ptrs<void, MAX_GPUS>(
+                    even_comm, j, ipc_ptrs[j], ipc_handle_map, q_worker, q.get_device(), 1);
+                comm_large_tmp_bufs.remote_pair_tmp_bufs[i] = get_ipc_ptrs<void, MAX_TILES>(
+                    pair_comm, j, ipc_ptrs[j], ipc_handle_map, q_worker, q.get_device(), 1);
+            }
+
+            q_worker.wait();
+        }
+        else {
+#endif // CCL_ENABLE_UMF
+
+            LOG_DEBUG("|SCHED|: do_ipc_exchange: with sched");
+            auto [sched, exchange_entry] = do_ipc_exchange(comm, global_stream, ipc_ptrs);
+
+            // add comm_barrier sync pointers to each communicator
+            for (size_t i = 0; i < sub_comms.size(); i++) {
+                auto remote_ptrs = get_ipc_ptrs<size_t, MAX_NODE_RANKS>(
+                    sub_comms[i], i, ipc_ptrs[i], sched, q_worker, 1);
+                sub_comms[i]->set_barrier_ptrs(remote_ptrs);
+            }
+            // get ipc pointers for small tmp buffers and add them to node_comm
+            for (size_t i = 0, j = small_buf_ipc_idx; i < ccl_tmp_bufs::buf_count; i++, j++) {
+                auto remote_ptrs = get_ipc_ptrs<void, MAX_NODE_RANKS>(
+                    node_comm, j, ipc_ptrs[j], sched, q_worker, 1);
+                node_comm->set_remote_tmp_bufs(remote_ptrs, i);
+            }
+            // get ipc pointers for large tmp_buffers
+            for (size_t i = 0, j = large_buf_ipc_idx; i < tmp_bufs.size(); i++, j++) {
+                comm_large_tmp_bufs.remote_tmp_bufs[i] = get_ipc_ptrs<void, MAX_NODE_RANKS>(
+                    node_comm, j, ipc_ptrs[j], sched, q_worker, 1);
+                comm_large_tmp_bufs.remote_even_tmp_bufs[i] =
+                    get_ipc_ptrs<void, MAX_GPUS>(even_comm, j, ipc_ptrs[j], sched, q_worker, 1);
+                comm_large_tmp_bufs.remote_pair_tmp_bufs[i] =
+                    get_ipc_ptrs<void, MAX_TILES>(pair_comm, j, ipc_ptrs[j], sched, q_worker, 1);
+            }
+
+            q_worker.wait();
+
+            delete exchange_entry;
+            delete sched;
+
+#ifdef CCL_ENABLE_UMF
+        }
+#endif // CCL_ENABLE_UMF
 
         auto evt = q.submit([=](sycl::handler &h) {
             h.host_task([node_comm]() {
@@ -301,24 +349,155 @@ void coll_init(ccl_comm *comm, ccl_stream *global_stream) {
     }
 }
 
-ccl_kernel_barrier_data &get_kernel_barrier_data() {
-    return kernel_barrier_data;
+void coll_initExt(ccl_comm *comm,
+                  std::unordered_map<int, std::unordered_map<int, std::vector<void *>>> &hash_table,
+                  ccl_stream *global_stream) {
+    static bool is_next_invocation[MAX_NODE_RANKS] = { false };
+    // TODO: check all pthread_barrier_wait invokes
+    std::shared_ptr<ccl_comm> node_comm = comm->get_node_comm();
+
+    ccl_comm_barrier_data bd = node_comm->barrier_data();
+    pthread_barrier_wait(
+        &ccl::global_data::get().shared_data->barrier_waits[comm->global_current_id]);
+
+    // if communicator is used for the first time then do ipc exchange
+    // to get remote pointers used for barrier counting and remote tmp bufs
+    if (!bd.is_set()) {
+        std::shared_ptr<ccl_comm> even_comm = comm->get_even_comm();
+        std::shared_ptr<ccl_comm> pair_comm = comm->get_pair_comm();
+        std::vector<std::shared_ptr<ccl_comm>> sub_comms{ node_comm, even_comm, pair_comm };
+        ccl_large_tmp_bufs &comm_large_tmp_bufs = node_comm->get_large_tmp_bufs();
+
+        sycl::queue q = global_stream->get_native_stream();
+        sycl::queue q_worker(q.get_device());
+
+        // alloc sync pointers to be used for global comm_barrier across ranks
+        constexpr int num_slots = ccl_comm_barrier_data::slots;
+        const size_t ptr_count = num_slots * sub_comms.size();
+        size_t *ptrs = sycl::malloc_device<size_t>(ptr_count, q);
+        q.memset(ptrs, 0, ptr_count * sizeof(size_t)).wait();
+        pthread_barrier_wait(
+            &ccl::global_data::get().shared_data->barrier_waits[comm->global_current_id]);
+        std::vector<void *> ipc_ptrs{ ptrs, ptrs + num_slots, ptrs + 2 * num_slots };
+
+        // do one-time initializations
+        if (is_thread_initial_invocation) {
+            is_thread_initial_invocation = false;
+
+            // allocate sync_ptrs for local kernel barrier
+            size_t *sync_ptrs = sycl::malloc_device<size_t>(ccl_kernel_barrier_data::slots, q);
+
+            // Initialize memory to zero using memset
+            q.memset(sync_ptrs, 0, ccl_kernel_barrier_data::slots * sizeof(size_t)).wait();
+
+            // Set the sync_ptrs for the kernel barrier data
+            get_kernel_barrier_data(comm).set_sync_ptrs(sync_ptrs);
+
+            //set up temp buf to be used for large collectives
+            const size_t tmp_buf_size = ccl::global_data::env().sycl_tmp_buf_size / tmp_bufs_count;
+            const size_t tmp_buf_size_per_rank_orig =
+                tmp_buf_size / comm->size(); //ccl::global_data::get().get_local_proc_count();
+            // adjust tmp_buf_size_per_rank to align in all ranks
+            const size_t align_bytes = ccl::global_data::env().kernel_mem_align;
+            tmp_buf_size_per_rank = (tmp_buf_size_per_rank_orig / align_bytes) * align_bytes;
+            char *tmp_buf = sycl::aligned_alloc_device<char>(
+                CCL_REG_MSG_ALIGNMENT, tmp_buf_size * tmp_bufs_count, q);
+            for (int i = 0; i < tmp_bufs_count; i++) {
+                thread_tmp_bufs[i] = tmp_buf + i * tmp_buf_size;
+            }
+        }
+        pthread_barrier_wait(
+            &ccl::global_data::get().shared_data->barrier_waits[comm->global_current_id]);
+
+        for (int i = 0; i < tmp_bufs_count; i++) {
+            comm_large_tmp_bufs.tmp_bufs[i] = thread_tmp_bufs[i];
+        }
+
+        // set up temp buf to be used for small collectives
+        const int small_buf_ipc_idx = ipc_ptrs.size();
+        char *tmp_buf = sycl::aligned_alloc_device<char>(
+            CCL_REG_MSG_ALIGNMENT, ccl_tmp_bufs::buf_size * ccl_tmp_bufs::buf_count, q);
+        for (int i = 0; i < ccl_tmp_bufs::buf_count; i++) {
+            void *tmp_buf_ptr = tmp_buf + i * ccl_tmp_bufs::buf_size;
+            node_comm->set_tmp_buf(tmp_buf_ptr, i);
+            ipc_ptrs.push_back(tmp_buf_ptr);
+        }
+        pthread_barrier_wait(
+            &ccl::global_data::get().shared_data->barrier_waits[comm->global_current_id]);
+        // add tmp buf pointers of large buffers
+        const int large_buf_ipc_idx = ipc_ptrs.size();
+
+        ipc_ptrs.insert(std::end(ipc_ptrs),
+                        std::begin(comm_large_tmp_bufs.tmp_bufs),
+                        std::end(comm_large_tmp_bufs.tmp_bufs));
+        ccl::global_data::get().shared_data->do_ipc_exchangeExt(
+            comm, hash_table, global_stream, ipc_ptrs);
+        pthread_barrier_wait(
+            &ccl::global_data::get().shared_data->barrier_waits[comm->global_current_id]);
+        // add comm_barrier sync pointers to each communicator
+        for (size_t i = 0; i < sub_comms.size(); i++) {
+            auto remote_ptrs =
+                ccl::global_data::get().shared_data->get_ipc_ptrsExt<size_t, MAX_NODE_RANKS>(
+                    sub_comms[i], hash_table, i, i, ipc_ptrs[i], 0, 0, even_comm, pair_comm);
+            sub_comms[i]->set_barrier_ptrs(remote_ptrs);
+        }
+        pthread_barrier_wait(
+            &ccl::global_data::get().shared_data->barrier_waits[comm->global_current_id]);
+        // get ipc pointers for small tmp buffers and add them to node_comm
+        for (size_t i = 0, j = small_buf_ipc_idx; i < ccl_tmp_bufs::buf_count; i++, j++) {
+            auto remote_ptrs =
+                ccl::global_data::get().shared_data->get_ipc_ptrsExt<void, MAX_NODE_RANKS>(
+                    node_comm, hash_table, 0 /*node*/, j, ipc_ptrs[j], 0, 0, even_comm, pair_comm);
+            node_comm->set_remote_tmp_bufs(remote_ptrs, i);
+        }
+        pthread_barrier_wait(
+            &ccl::global_data::get().shared_data->barrier_waits[comm->global_current_id]);
+        // get ipc pointers for large tmp_buffers
+        for (size_t i = 0, j = large_buf_ipc_idx; i < tmp_bufs.size(); i++, j++) {
+            comm_large_tmp_bufs.remote_tmp_bufs[i] =
+                ccl::global_data::get().shared_data->get_ipc_ptrsExt<void, MAX_NODE_RANKS>(
+                    node_comm, hash_table, 0 /*node*/, j, ipc_ptrs[j], 0, 0, even_comm, pair_comm);
+            comm_large_tmp_bufs.remote_even_tmp_bufs[i] =
+                ccl::global_data::get().shared_data->get_ipc_ptrsExt<void, MAX_GPUS>(
+                    even_comm, hash_table, 1 /*even*/, j, ipc_ptrs[j], 0, 0, even_comm, pair_comm);
+            comm_large_tmp_bufs.remote_pair_tmp_bufs[i] =
+                ccl::global_data::get().shared_data->get_ipc_ptrsExt<void, 2>(
+                    pair_comm, hash_table, 2 /*pair*/, j, ipc_ptrs[j], 0, 0, even_comm, pair_comm);
+        }
+        pthread_barrier_wait(
+            &ccl::global_data::get().shared_data->barrier_waits[comm->global_current_id]);
+        q_worker.wait();
+    }
+    pthread_barrier_wait(
+        &ccl::global_data::get().shared_data->barrier_waits[comm->global_current_id]);
 }
 
-void *get_tmp_buf(int index) {
-    return tmp_bufs[index];
+ccl_kernel_barrier_data &get_kernel_barrier_data(ccl_comm *comm) {
+    return comm->is_multi_thread_instance() ? thread_kernel_barrier_data : kernel_barrier_data;
 }
 
-std::array<void *, MAX_NODE_RANKS> get_remote_node_tmp_buf(int index) {
-    return remote_tmp_bufs[index];
+void *get_tmp_buf(int index, ccl_comm *comm) {
+    ccl_comm *node_comm = comm->get_node_comm().get();
+    ccl_large_tmp_bufs &comm_large_tmp_bufs = node_comm->get_large_tmp_bufs();
+    return comm_large_tmp_bufs.tmp_bufs[index];
 }
 
-std::array<void *, MAX_GPUS> get_remote_even_tmp_buf(int index) {
-    return remote_even_tmp_bufs[index];
+std::array<void *, MAX_NODE_RANKS> get_remote_node_tmp_buf(int index, ccl_comm *comm) {
+    ccl_comm *node_comm = comm->get_node_comm().get();
+    ccl_large_tmp_bufs &comm_large_tmp_bufs = node_comm->get_large_tmp_bufs();
+    return comm_large_tmp_bufs.remote_tmp_bufs[index];
 }
 
-std::array<void *, MAX_TILES> get_remote_pair_tmp_buf(int index) {
-    return remote_pair_tmp_bufs[index];
+std::array<void *, MAX_GPUS> get_remote_even_tmp_buf(int index, ccl_comm *comm) {
+    ccl_comm *node_comm = comm->get_node_comm().get();
+    ccl_large_tmp_bufs &comm_large_tmp_bufs = node_comm->get_large_tmp_bufs();
+    return comm_large_tmp_bufs.remote_even_tmp_bufs[index];
+}
+
+std::array<void *, MAX_TILES> get_remote_pair_tmp_buf(int index, ccl_comm *comm) {
+    ccl_comm *node_comm = comm->get_node_comm().get();
+    ccl_large_tmp_bufs &comm_large_tmp_bufs = node_comm->get_large_tmp_bufs();
+    return comm_large_tmp_bufs.remote_pair_tmp_bufs[index];
 }
 
 size_t get_tmp_buf_size_per_rank() {
@@ -354,7 +533,7 @@ sycl::event invoke_barrier(const std::shared_ptr<ccl_comm> comm,
             h.parallel_for(
                 sycl::nd_range<1>(MAX_NODE_RANKS, MAX_NODE_RANKS),
                 [=](sycl::nd_item<1> it)
-                    [[intel::reqd_sub_group_size(16)]] { comm_barrier(barrier_data, it); });
+                    [[sycl::reqd_sub_group_size(16)]] { comm_barrier(barrier_data, it); });
         });
     }
     return e;
@@ -398,4 +577,26 @@ void copy_data(const int dsize,
         });
         out.push_back(e);
     }
+}
+
+sycl::event sycl_average(sycl::queue &q,
+                         void *reduce_buf,
+                         const size_t reduce_count,
+                         const size_t total_ranks,
+                         ccl::datatype dtype,
+                         std::vector<sycl::event> &dep_events) {
+    auto lambda = [&]<typename T>() {
+        bool use_full_vector = can_use_full_vector(reduce_buf, reduce_buf, reduce_count);
+        if (use_full_vector) {
+            constexpr int vec_size = get_num_elements<T, 8, true>();
+            return reduce_average_invoke<T, vec_size, 16>(
+                q, reduce_buf, reduce_count, total_ranks, dep_events);
+        }
+        else {
+            constexpr int vec_size = get_num_elements<T, 8, false>();
+            return reduce_average_invoke<T, vec_size, 64>(
+                q, reduce_buf, reduce_count, total_ranks, dep_events);
+        }
+    };
+    return invoke_scaleout(lambda, dtype);
 }

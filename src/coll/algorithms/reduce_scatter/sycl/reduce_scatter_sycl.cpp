@@ -14,7 +14,6 @@
  limitations under the License.
 */
 #include "coll/algorithms/utils/sycl_coll_base.hpp"
-//#include "coll/algorithms/reduce_scatter/sycl/reduce_scatter_ring.hpp"
 #include "common/api_wrapper/mpi_api_wrapper.hpp"
 
 #if defined(CCL_ENABLE_ZE) || defined(CCL_ENABLE_SYCL)
@@ -70,7 +69,8 @@ ccl::event reduce_scatter_sycl_single_node(sycl::queue& q,
                 "reduce_scatter_small", "send_size", recv_count * world * ccl_dtype.size());
 #endif // CCL_ENABLE_ITT
             LOG_DEBUG("invoking small reduce_scatter: recv_count:", recv_count, " datatype: ", dtype);
-            e = reduce_scatter_small(send_buf, recv_buf, recv_count, dtype, reduction, comm, global_stream, deps);
+            e = reduce_scatter_small(
+                send_buf, recv_buf, recv_count, 0 /* rem_count */, dtype, reduction, comm, global_stream, deps);
 #ifdef CCL_ENABLE_ITT
             ccl::profile::itt::task_end();
 #endif // CCL_ENABLE_ITT
@@ -153,18 +153,25 @@ inline void copy_kernel(void* out, const void* in) {
 }
 
 template <typename T, int vec_size>
-void inline copy_vec(const void* in, void* out, int out_idx, int b_idx, int in_idx, int recv_count) {
+void inline copy_vec(const void* in,
+                     void* out,
+                     int out_idx,
+                     int b_idx,
+                     int in_idx,
+                     size_t recv_count,
+                     size_t displ,
+                     size_t block_count) {
     using AT = sycl::vec<T, vec_size>;
     const size_t packed_count = recv_count / vec_size;
     if (b_idx < packed_count) {
         int offset = b_idx * vec_size;
-        T* in_ptr = (T*)in + in_idx * recv_count + offset;
+        T* in_ptr = (T*)in + in_idx * block_count + displ + offset;
         T* out_ptr = (T*)out + out_idx * recv_count + offset;
         copy_kernel<AT>(out_ptr, in_ptr);
     }
     else {
         int offset = vec_size * packed_count + (b_idx - packed_count);
-        T* in_ptr = (T*)in + in_idx * recv_count + offset;
+        T* in_ptr = (T*)in + in_idx * block_count + displ + offset;
         T* out_ptr = (T*)out + out_idx * recv_count + offset;
         if (offset < recv_count) {
             *out_ptr = *in_ptr;
@@ -178,6 +185,8 @@ sycl::event transposeT(sycl::queue& q,
                        const void* send_buf,
                        void* out_buf,
                        size_t recv_count,
+                       size_t displ,
+                       size_t block_count,
                        datatype dtype,
                        int nodes,
                        int ppn,
@@ -197,17 +206,20 @@ sycl::event transposeT(sycl::queue& q,
             int a = idx / vec_count;
             int b = idx % vec_count;
             int a_from = pred_loc(a, nodes, ppn);
-            copy_vec<T, vec_size>(send_buf, out_buf, a, b, a_from, recv_count);
+            copy_vec<T, vec_size>(send_buf, out_buf, a, b, a_from, recv_count, displ, block_count);
         });
     });
     return e;
 }
 
 // multiple sycl kernel version
+// support chunking, pack into contiguous output buffer
 static sycl::event transpose(sycl::queue& q,
                              const void* send_buf,
                              void* out_buf,
                              size_t recv_count,
+                             size_t displ,
+                             size_t block_count,
                              datatype dtype,
                              int nodes,
                              int ppn,
@@ -231,10 +243,12 @@ static sycl::event transpose(sycl::queue& q,
 
     auto ccl_dtype = ccl::global_data::get().dtypes->get(dtype);
     size_t chunk_size = recv_count * ccl_dtype.size();
+    size_t block_size = block_count * ccl_dtype.size();
+    size_t displ_size = displ * ccl_dtype.size();
     int n = 0;
     for (int i = 0; i < ppn; i++) {
         for (int j = 0; j < nodes; j++) {
-            char* src = (char*)send_buf + (j * ppn + i) * chunk_size;
+            char* src = (char*)send_buf + (j * ppn + i) * block_size + displ_size;
             char* dest = (char*)out_buf + n * chunk_size;
             n++;
             e = q_worker.submit([=](sycl::handler& h) {
@@ -247,10 +261,7 @@ static sycl::event transpose(sycl::queue& q,
         }
     }
 #if USE_OOO_QUEUE
-    e = q.submit([=](sycl::handler& h) {
-        h.depends_on(evs);
-        h.single_task([]() {});
-    });
+    e = submit_wait_on_events(q, evs);
 #endif // USE_OOO_QUEUE
     return e;
 }
@@ -258,7 +269,9 @@ static sycl::event transpose(sycl::queue& q,
 static sycl::event rearrange(sycl::queue& q,
                              const void* send_buf,
                              void* staging_buf,
-                             size_t recv_count,
+                             size_t recv_count, /* actual recv count */
+                             size_t displ, /* offset */
+                             size_t block_count, /* block count, or stride for input buffer */
                              datatype dtype,
                              int nodes,
                              int ppn,
@@ -267,8 +280,8 @@ static sycl::event rearrange(sycl::queue& q,
     auto ccl_dtype = ccl::global_data::get().dtypes->get(dtype);
     size_t total_size = recv_count * ccl_dtype.size() * nodes * ppn;
 
-    if (total_size <= 536870912) {
-        // single sycl kernel
+    if (total_size <= 1073741824) {
+        // single sycl kernel only works on the full buffer
         int align4 = ccl_dtype.size() >= 4 || is_aligned(send_buf, recv_count * ccl_dtype.size(), 4);
         auto lambda = [&]<typename T>() {
             if (recv_count <= 65536) {
@@ -276,24 +289,24 @@ static sycl::event rearrange(sycl::queue& q,
                 if (align4) {
                     constexpr int vec_size = 8 / sizeof(T);
                     return transposeT<T, vec_size, 8>(
-                        q, send_buf, staging_buf, recv_count, dtype, nodes, ppn, dep_events);
+                        q, send_buf, staging_buf, recv_count, displ, block_count, dtype, nodes, ppn, dep_events);
                 }
                 else {
                     constexpr int vec_size = 4 / sizeof(T);
                     return transposeT<T, vec_size, 32>(
-                        q, send_buf, staging_buf, recv_count, dtype, nodes, ppn, dep_events);
+                        q, send_buf, staging_buf, recv_count, displ, block_count, dtype, nodes, ppn, dep_events);
                 }
             }
             else {
                 if (align4) {
                     constexpr int vec_size = 8 / sizeof(T);
                     return transposeT<T, vec_size, 32>(
-                        q, send_buf, staging_buf, recv_count, dtype, nodes, ppn, dep_events);
+                        q, send_buf, staging_buf, recv_count, displ, block_count, dtype, nodes, ppn, dep_events);
                 }
                 else {
                     constexpr int vec_size = 4 / sizeof(T);
                     return transposeT<T, vec_size, 32>(
-                        q, send_buf, staging_buf, recv_count, dtype, nodes, ppn, dep_events);
+                        q, send_buf, staging_buf, recv_count, displ, block_count, dtype, nodes, ppn, dep_events);
                 }
             }
         };
@@ -301,12 +314,22 @@ static sycl::event rearrange(sycl::queue& q,
     }
     else {
         // multiple sycl kernels
-        e = transpose(q, send_buf, staging_buf, recv_count, dtype, nodes, ppn, dep_events);
+        e = transpose(q, send_buf, staging_buf, recv_count, displ, block_count, dtype, nodes, ppn, dep_events);
     }
     return e;
 }
 
 //#define PRINT_TIMING
+
+static bool do_fallback_to_scheduler(size_t size) {
+    if (size > ccl::global_data::env().sycl_reduce_scatter_scaleout_threshold)
+        return true;
+    if (ccl::global_data::env().atl_transport == ccl_atl_ofi &&
+        (ccl::global_data::env().sycl_reduce_scatter_scaleout_algo == "auto" ||
+         ccl::global_data::env().sycl_reduce_scatter_scaleout_algo == "direct"))
+        return true;
+    return false;
+}
 
 ccl::event reduce_scatter_sycl_multi_node(sycl::queue& q,
                                           const void* send_buf,
@@ -335,124 +358,181 @@ ccl::event reduce_scatter_sycl_multi_node(sycl::queue& q,
 
     auto ccl_dtype = ccl::global_data::get().dtypes->get(dtype);
     size_t total_size = recv_count * ccl_dtype.size() * world;
+    CCL_ASSERT(recv_count > 0);
 
-    // check threshold to disable scaleout algorithm
-    if (recv_count * ccl_dtype.size() > ccl::global_data::env().sycl_reduce_scatter_scaleout_threshold) {
-        // fallback
+    // check if to fallback
+    if (do_fallback_to_scheduler(recv_count * ccl_dtype.size())) {
         done = false;
         return ev;
     }
 
     // only do scale-out or small message sizes
-    if (node_comm->size() == 1 || (comm->size() < 4 && total_size <= 131072)) {
-        // for small scale, call MPI directly
-        bool direct = false;
-        if ((r2r_comm->size() < 4 && recv_count * ccl_dtype.size() * r2r_comm->size() <= 131072) &&
-            ccl::global_data::env().atl_transport != ccl_atl_ofi) {
-            direct = true;
-        }
+    if (node_comm->size() == 1) {
+        sycl_reduce_scatter_tune_attr scaleout_tune_attr = reduce_scatter_select_tune_attr(
+            recv_count * ccl_dtype.size() * r2r_comm->size(), r2r_comm->size(), ccl_dtype);
         ev = reduce_scatter_scaleout_sycl(
-            q, send_buf, recv_buf, recv_count, dtype, reduction, comm, deps, done, direct);
+            q, send_buf, recv_buf, recv_count, dtype, reduction, comm, deps, true, scaleout_tune_attr, done);
+
+        if (reduction == ccl::reduction::avg) {
+            // set dependencies
+            std::vector<sycl::event> avg_deps_evs;
+            avg_deps_evs.push_back(ev.get_native());
+            // average divisor
+            int total_ranks = comm->size();
+            LOG_DEBUG(
+                "reduce_scatter_sycl calculate average on recv_count: ", recv_count, ", ranks: ", total_ranks);
+
+            sycl::event reduce_event = sycl_average(q, recv_buf, recv_count, total_ranks, dtype, avg_deps_evs);
+            ev = ccl::event::create_from_native(reduce_event);
+        }
         return ev;
     }
 
     bool __attribute__((unused)) in_place = (recv_buf == (char*)send_buf + recv_count * rank * ccl_dtype.size());
-    std::vector<sycl::event> dep_events = get_sycl_events(deps);
 
 #ifdef PRINT_TIMING
+    q.wait();
     cpu_timer<1> ctimer;
-    ctimer.start(0);
 #endif // PRINT_TIMING
 
-    // rearrange data to a staging buffer of same size
-    void* staging_buf;
-    int to_free = 0;
-    if (total_size <= comm->get_scaleout_device_buf_size()) {
-        staging_buf = comm->get_scaleout_device_buf(q);
+    const int buf_size = comm->get_scaleout_device_buf_size();
+    void* staging_buf = comm->get_scaleout_device_buf(q);
+    size_t max_pack_count;
+    if (total_size <= buf_size) {
+        max_pack_count = recv_count;
     }
     else {
-        staging_buf = sycl::malloc_device(total_size, q);
-        to_free = 1;
+        max_pack_count = buf_size / world;
+        int typesize = std::max(4, (int)ccl_dtype.size());
+        max_pack_count = max_pack_count / typesize * typesize;
+        max_pack_count = max_pack_count / ccl_dtype.size();
+        CCL_ASSERT(max_pack_count > 0);
     }
 
-    e = rearrange(q, send_buf, staging_buf, recv_count, dtype, r2r_comm->size(), node_comm->size(), dep_events);
-
-#ifdef PRINT_TIMING
-    e.wait();
-    q.wait(); // for multiple kernels with out-of-order queue
-    ctimer.stop(0);
-    fprintf(stderr, "[%d] rearrange takes %f us on data: %ld \n", rank, ctimer.get_us(0), recv_count * world);
-
-    ctimer.start(0);
-#endif // PRINT_TIMING
-
-    // scale up on each node
     std::vector<event> evs;
-    ev = ccl::event::create_from_native(e);
-    evs.push_back(std::move(ev));
-    size_t scaleup_recv_count = recv_count * r2r_comm->size();
-    // doing scale up in place might not be good if not 4-byte aligned
-    constexpr bool do_inplace = false;
-    void* scaleup_buf =
-        do_inplace ? (char*)staging_buf + scaleup_recv_count * node_comm->rank() * ccl_dtype.size() : staging_buf;
-    ev = reduce_scatter_sycl_single_node(q,
-                                         staging_buf,
-                                         scaleup_buf,
-                                         scaleup_recv_count,
-                                         dtype,
-                                         reduction,
-                                         node_comm.get(),
-                                         global_stream,
-                                         evs,
-                                         done);
-    if (!done) {
-        // fallback
-        LOG_INFO("allreduce_sycl allgatherv was not done -- falling back");
-        return ev;
-    }
+    size_t displ = 0;
+    int nchunks = (recv_count + max_pack_count - 1) / max_pack_count;
+    for (int i = 0; i < nchunks; i++) {
+        size_t pack_count = i < nchunks - 1 ? max_pack_count : recv_count - displ;
 
 #ifdef PRINT_TIMING
-    ev.wait();
-    ctimer.stop(0);
-    fprintf(stderr, "[%d] scale up takes %f us on %ld\n", rank, ctimer.get_us(0), recv_count * r2r_comm->size());
-
-    ctimer.start(0);
+        ctimer.start(0);
 #endif // PRINT_TIMING
 
-    // scale out
-    evs.clear();
-    evs.push_back(std::move(ev));
-    bool direct = false;
-    if (recv_count * ccl_dtype.size() * r2r_comm->size() <=
-            ccl::global_data::env().sycl_reduce_scatter_scaleout_direct_threshold &&
-        ccl::global_data::env().atl_transport != ccl_atl_ofi) {
-        direct = true;
-    }
-    ev = reduce_scatter_scaleout_sycl(
-        q, scaleup_buf, recv_buf, recv_count, dtype, reduction, r2r_comm.get(), evs, done, direct);
+        // rearrange data to a staging buffer of same size
+        std::vector<sycl::event> dep_events = get_sycl_events(i == 0 ? deps : evs);
+        e = rearrange(q,
+                      send_buf,
+                      staging_buf,
+                      pack_count,
+                      displ,
+                      recv_count,
+                      dtype,
+                      r2r_comm->size(),
+                      node_comm->size(),
+                      dep_events);
 
 #ifdef PRINT_TIMING
-    ev.wait();
-    ctimer.stop(0);
-    fprintf(stderr,
-            "[%d] scale out takes %f us on %ld count node %d\n",
-            rank,
-            ctimer.get_us(0),
-            recv_count,
-            r2r_comm->size());
+        e.wait();
+        q.wait(); // for multiple kernels with out-of-order queue
+        ctimer.stop(0);
+        fprintf(stderr,
+                "[%d] rearrange takes %f us on data: %ld displ: %ld\n",
+                rank,
+                ctimer.get_us(0),
+                recv_count * world,
+                displ);
+
+        ctimer.start(0);
 #endif // PRINT_TIMING
 
-    if (to_free) {
-        e = q.submit([=](sycl::handler& h) {
-            h.host_task([=]() {
-                sycl::free(staging_buf, q);
-            });
-        });
+        // scale up on each node
         ev = ccl::event::create_from_native(e);
-    }
-    else {
-        comm->put_scaleout_device_buf(staging_buf);
-    }
+        evs.push_back(std::move(ev));
+        size_t scaleup_recv_count = pack_count * r2r_comm->size();
+        void* scaleup_buf = (char*)staging_buf + scaleup_recv_count * node_comm->rank() * ccl_dtype.size();
+        ev = reduce_scatter_sycl_single_node(q,
+                                             staging_buf,
+                                             scaleup_buf,
+                                             scaleup_recv_count,
+                                             dtype,
+                                             ccl::reduction::sum,
+                                             node_comm.get(),
+                                             global_stream,
+                                             evs,
+                                             done);
+        if (!done) {
+            // fallback
+            LOG_INFO("allreduce_sycl allgatherv was not done -- falling back");
+            return ev;
+        }
+
+#ifdef PRINT_TIMING
+        ev.wait();
+        ctimer.stop(0);
+        fprintf(stderr,
+                "[%d] scale up takes %f us on %ld displ: %ld\n",
+                rank,
+                ctimer.get_us(0),
+                recv_count * r2r_comm->size(),
+                displ);
+
+        ctimer.start(0);
+#endif // PRINT_TIMING
+
+        // scale out
+        evs.clear();
+        evs.push_back(std::move(ev));
+        sycl_reduce_scatter_tune_attr scaleout_tune_attr =
+            reduce_scatter_select_tune_attr(pack_count * ccl_dtype.size(), r2r_comm->size(), ccl_dtype);
+        void* scaleout_recv_buf = (char*)recv_buf + displ * ccl_dtype.size();
+        ev = reduce_scatter_scaleout_sycl(q,
+                                          scaleup_buf,
+                                          scaleout_recv_buf,
+                                          pack_count,
+                                          dtype,
+                                          ccl::reduction::sum,
+                                          r2r_comm.get(),
+                                          evs,
+                                          false,
+                                          scaleout_tune_attr,
+                                          done);
+        CCL_ASSERT(done);
+
+#ifdef PRINT_TIMING
+        ev.wait();
+        ctimer.stop(0);
+        fprintf(stderr,
+                "[%d] scale out takes %f us on %ld count node %d displ:%ld\n",
+                rank,
+                ctimer.get_us(0),
+                recv_count,
+                r2r_comm->size(),
+                displ);
+#endif // PRINT_TIMING
+
+        if (reduction == ccl::reduction::avg) {
+            // set dependencies
+            std::vector<sycl::event> avg_deps_evs;
+            avg_deps_evs.push_back(ev.get_native());
+            // average divisor
+            int total_ranks = comm->size();
+            LOG_DEBUG("reduce_scatter_sycl calculate average on counts: ", pack_count, ", ranks: ", total_ranks);
+
+            sycl::event reduce_event =
+                sycl_average(q, scaleout_recv_buf, pack_count, total_ranks, dtype, avg_deps_evs);
+            ev = ccl::event::create_from_native(reduce_event);
+        }
+
+        //ev.wait();
+        if (i < nchunks - 1) {
+            evs.clear();
+            evs.push_back(std::move(ev));
+            displ += pack_count;
+        }
+    } // end of for
+
+    comm->put_scaleout_device_buf(staging_buf);
 
     return ev;
 }

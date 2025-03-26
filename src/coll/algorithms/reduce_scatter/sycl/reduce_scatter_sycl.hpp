@@ -15,6 +15,8 @@
 */
 #pragma once
 
+#include "coll/algorithms/utils/sycl_selection.hpp"
+
 #define SYCL_REDUCE_SCATTER_FUNCTIONS(MSGSIZE) \
     void init_reduce_scatter_##MSGSIZE(ccl::datatype dtype, \
                                        sycl::queue& queue, \
@@ -66,13 +68,15 @@ ccl::event reduce_scatter_scaleout_sycl(sycl::queue& q,
                                         ccl::reduction reduction,
                                         ccl_comm* comm,
                                         const ccl::vector_class<ccl::event>& deps,
+                                        bool original_deps,
+                                        sycl_reduce_scatter_tune_attr& tune_attr,
                                         bool& done,
-                                        bool direct = false,
                                         bool is_cpu_buffers = false);
 
 ccl::event reduce_scatter_small(const void* send_buf,
                                 void* recv_buf,
                                 size_t recv_count,
+                                size_t rem_count,
                                 ccl::datatype dtype,
                                 ccl::reduction reduction,
                                 ccl_comm* comm,

@@ -38,6 +38,11 @@ public:
 
     std::shared_ptr<atl_base_comm> comm_split(int color, int key) override;
 
+    int get_mpi_comm() override {
+        atl_mpi_ep_t* mpi_ep = ((atl_mpi_ep_t*)eps[0].internal);
+        return (int)(mpi_ep->mpi_comm);
+    }
+
 private:
     friend atl_comm_manager;
     atl_mpi_comm(atl_mpi_comm* parent, int color, int key);

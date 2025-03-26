@@ -92,10 +92,11 @@ ccl::event reduce_scatter_scaleout_sycl_simple(sycl::queue& q,
     op_end.wait();
     ctimer.stop(0);
     fprintf(stderr,
-            "[%d] copy GPU to CPU takes: %f us on %ld bytes\n",
+            "[%d] copy GPU to CPU takes: %f us on %ld bytes (recv_count: %ld)\n",
             rank,
             ctimer.get_us(0),
-            count * ccl_dtype.size());
+            count * ccl_dtype.size(),
+            recv_count);
     ctimer.start(0);
 #endif // PRINT_TIMING
 
@@ -118,7 +119,7 @@ ccl::event reduce_scatter_scaleout_sycl_simple(sycl::queue& q,
             if (!req.is_completed) {
                 // We do not want to call check() in a loop (because we would call MPI_Test repeatedly). Call MPI_Wait() instead.
                 ATL_CALL_THROW_IF_ERROR(atl_comm->check(ep_idx, req));
-                while (!req.is_completed)
+                if (!req.is_completed)
                     ATL_CALL_THROW_IF_ERROR(atl_comm->wait(ep_idx, req));
                 // TODO: if it is determined that running atl_comm->allreduce from inside allreduce_entry (i.e. the sched) is WAY faster than running it from out here, how about checking how the schedule does progress()?
                 //       allreduce_entry::update() does a simple check():     atl_status_t atl_status = comm->get_atl_comm()->check(sched->bin->get_atl_ep(), req);
@@ -133,7 +134,7 @@ ccl::event reduce_scatter_scaleout_sycl_simple(sycl::queue& q,
 #ifdef PRINT_TIMING
     op_end.wait();
     ctimer.stop(0);
-    fprintf(stderr, "[%d] MPI reduce_scatter takes: %f us\n", rank, ctimer.get_us(0));
+    fprintf(stderr, "[%d] MPI reduce_scatter takes: %f us, recv_count: %ld\n", rank, ctimer.get_us(0), recv_count);
 #endif // PRINT_TIMING
 
     if (copy_to_host) {
@@ -167,16 +168,19 @@ ccl::event reduce_scatter_scaleout_sycl(sycl::queue& q,
                                         ccl::reduction reduction,
                                         ccl_comm* comm,
                                         const ccl::vector_class<ccl::event>& deps,
+                                        bool original_deps,
+                                        sycl_reduce_scatter_tune_attr& tune_attr,
                                         bool& done,
-                                        bool direct,
                                         bool is_cpu_buffers) {
-    if (direct) {
+    reduce_scatter_scaleout_algo algo = tune_attr.algo;
+    if (algo == reduce_scatter_scaleout_algo::direct) {
         bool copy_to_host = ccl::global_data::env().sycl_enable_direct_gpu_rdma ? false : true;
         return reduce_scatter_scaleout_sycl_simple(
             q, send_buf, recv_buf, recv_count, dtype, reduction, comm, deps, done, copy_to_host, is_cpu_buffers);
     }
     else {
-        sycl::event e = reduce_scatter_ring(q, send_buf, recv_buf, recv_count, dtype, reduction, comm, deps, done);
+        sycl::event e = reduce_scatter_ring(
+            q, send_buf, recv_buf, recv_count, dtype, reduction, comm, deps, original_deps, tune_attr, done);
         return ccl::event::create_from_native(e);
     }
 }

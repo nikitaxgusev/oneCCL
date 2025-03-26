@@ -963,7 +963,7 @@ private:
         e = queue.submit([&](sycl::handler &cgh) {
             cgh.depends_on(sycl_events);
                 cgh.parallel_for<class Allreduce_small_kernel_scalar<data_type, kernel_inner_loop_scalar>>(
-                    sycl::nd_range<1>( total_threads_dispatched, wg_size), [=](sycl::nd_item<1> idx2) [[intel::reqd_sub_group_size(wg_size)]] {
+                    sycl::nd_range<1>( total_threads_dispatched, wg_size), [=](sycl::nd_item<1> idx2) [[sycl::reqd_sub_group_size(wg_size)]] {
                     uint32_t idx = idx2.get_global_id();
                     uint32_t offset __attribute__((unused)) = idx * kernel_inner_loop_scalar;
 

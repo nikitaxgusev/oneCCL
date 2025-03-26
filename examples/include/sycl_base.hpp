@@ -559,3 +559,152 @@ inline sycl::event submit_barrier(sycl::queue queue) {
     return queue.submit_barrier();
 #endif // ICPX_VERSION
 }
+
+enum class queue_type { in_order, out_of_order };
+
+inline std::string convert_queue_type(queue_type val) {
+    static std::unordered_map<queue_type, std::string> convert = {
+        { queue_type::in_order, "in_order" }, { queue_type::out_of_order, "out_of_order" }
+    };
+    return convert[val];
+}
+
+struct test_args {
+    int argc = 0;
+    char** argv = nullptr;
+    int rank = 0;
+    queue_type queue = queue_type::in_order;
+    size_t count = 0;
+    bool group_api = false;
+
+    static const size_t DEFAULT_COUNT = 10 * 1024 * 1024;
+
+    test_args(int argc, char* argv[], int rank)
+            : argc(argc),
+              argv(argv),
+              rank(rank),
+              count(DEFAULT_COUNT) {
+        parse();
+        print();
+    }
+
+    void print() const {
+        if (rank == 0) {
+            std::cout << "queue_type: " << convert_queue_type(queue) << "\n";
+            std::cout << "group_api: " << group_api << "\n";
+            std::cout << "count: " << count << "\n";
+        }
+    }
+
+    void print_help(const char* test) const {
+        std::cout << "Usage: " << test << " [--queue_type <queue_type>] [--count <data_count>]\n";
+        std::cout << "Options:\n";
+        std::cout
+            << " --queue_type <queue_type>   Choose in_order or out_of_order (default is in_order)\n";
+        std::cout << " --count <data_count>  Specify the data count\n";
+    }
+
+    void parse() {
+        std::unordered_map<std::string, std::string> args_map;
+        if (argc > 1) {
+            if ((std::strcmp(argv[1], "--help") == 0 || std::strcmp(argv[1], "-h") == 0)) {
+                if (rank == 0) {
+                    print_help(argv[0]);
+                }
+                exit(0);
+            }
+        }
+
+        // parse command line arguments
+        for (int i = 1; i < argc; ++i) {
+            std::string arg = argv[i];
+            if (arg.substr(0, 2) == "--") {
+                arg = arg.substr(2);
+                if (i + 1 < argc && argv[i + 1][0] != '-') {
+                    args_map[arg] = argv[i + 1];
+                    ++i;
+                }
+                else {
+                    args_map[arg] = "";
+                }
+            }
+        }
+
+        if (args_map.find("queue_type") != args_map.end()) {
+            std::string type_str = args_map["queue_type"];
+            if (type_str == "in_order") {
+                queue = queue_type::in_order;
+            }
+            else if (type_str == "out_of_order") {
+                queue = queue_type::out_of_order;
+            }
+            else {
+                std::cerr << "Invalid queue_type: " << type_str << std::endl;
+                exit(1);
+            }
+        }
+
+        if (args_map.find("group_api") != args_map.end()) {
+            std::string type_str = args_map["group_api"];
+            if (type_str == "1") {
+                group_api = true;
+            }
+            else if (type_str == "0") {
+                group_api = false;
+            }
+            else {
+                std::cerr << "Invalid group_api argument: " << type_str << std::endl;
+                exit(1);
+            }
+        }
+
+        if (args_map.find("count") != args_map.end()) {
+            std::string count_str = args_map["count"];
+            count = std::stoi(count_str);
+        }
+    };
+};
+
+// returns true if the queue is successfully created, otherwise false
+inline bool create_test_sycl_queue(const std::string& type,
+                                   int rank,
+                                   sycl::queue& q,
+                                   test_args& args) {
+    sycl::property_list props;
+
+    if (args.queue == queue_type::in_order) {
+        props = { sycl::property::queue::in_order{}, sycl::property::queue::enable_profiling{} };
+    }
+    else {
+        props = { sycl::property::queue::enable_profiling{} };
+    }
+
+    return create_sycl_queue(type, rank, q, props);
+}
+
+inline bool check_example_args(int argc, char* argv[]) {
+    if (argc < 3) {
+        std::cout << "usage: " << argv[0] << " <device_type> <alloc_type>\n";
+        std::cout << "device_type: 'cpu' or 'gpu'\n";
+        std::cout << "alloc_type: 'host', 'device', or 'shared'\n";
+        std::cout << "example: " << argv[0] << " cpu shared\n";
+        return false;
+    }
+
+    std::string device_type = argv[1];
+    std::string alloc_type = argv[2];
+
+    if (device_type != "cpu" && device_type != "gpu") {
+        std::cout << "error: Invalid device '" << device_type << "'.\n";
+        std::cout << "device_type must be either 'cpu' or 'gpu'.\n";
+        return false;
+    }
+
+    if (alloc_type != "host" && alloc_type != "device" && alloc_type != "shared") {
+        std::cout << "error: Invalid alloc_type '" << alloc_type << "'.\n";
+        std::cout << "alloc_type must be either 'host', 'device', or 'shared'.\n";
+        return false;
+    }
+
+    return true;
+}

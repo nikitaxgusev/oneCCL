@@ -41,6 +41,7 @@
 #define DEFAULT_BUF_COUNT       (1)
 #define DEFAULT_MIN_ELEM_COUNT  (0)
 #define DEFAULT_MAX_ELEM_COUNT  (128)
+#define DEFAULT_ELEM_OFFSET     (0)
 #define DEFAULT_CHECK_VALUES    CHECK_LAST_ITER
 #define DEFAULT_EXT_VALUES      EXT_AUTO
 #define DEFAULT_CACHE_OPS       (1)
@@ -57,4 +58,5 @@
 #define DEFAULT_COLL_LIST       "allreduce"
 #define DEFAULT_DTYPES_LIST     "float32"
 #define DEFAULT_REDUCTIONS_LIST "sum"
+#define DEFAULT_VERBOSITY       (0)
 #define DEFAULT_CSV_FILEPATH    ""

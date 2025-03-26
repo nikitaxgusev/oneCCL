@@ -236,7 +236,8 @@ public:
                             int local_count) override;
 
     atl_status_t get_rank2proc_map(std::shared_ptr<ipmi> pmi,
-                                   std::vector<int>& rank2proc_map) override {
+                                   std::vector<int>& rank2proc_map,
+                                   atl_proc_coord_t coord) override {
         return ATL_STATUS_UNSUPPORTED;
     }
 

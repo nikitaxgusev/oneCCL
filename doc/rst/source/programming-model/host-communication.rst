@@ -4,34 +4,21 @@
 Host Communication
 ==================
 
-The communication operations between processes are provided by `Communicator`_.
+The oneCCL Communicator defines a group of processes that communicate with each other.
 
-The example below demonstrates the main concepts of communication on host memory buffers.
-
-.. rubric:: Example
+The following example demonstrates communication between two processes on host memory buffers.
 
 Consider a simple oneCCL ``allreduce`` example for CPU.
 
-1. Create a communicator object with user-supplied size, rank, and key-value store:
+.. rubric:: Example
 
-   .. code:: cpp
-
-      auto ccl_context = ccl::create_context();
-      auto ccl_device = ccl::create_device();
-
-      auto comms = ccl::create_communicators(
-         size,
-         vector_class<pair_class<size_t, device>>{ { rank, ccl_device } },
-         ccl_context,
-         kvs);
-
-   Or for convenience use non-vector form without device and context parameters.
+#. Create a communicator object and provide the size, rank, and key-value store values:
 
    .. code:: cpp
 
       auto comm = ccl::create_communicator(size, rank, kvs);
 
-2. Initialize ``send_buf`` (in real scenario it is supplied by the user):
+#. Initialize ``send_buf`` by providing the input content. For example, you can create and initialize the ``send_buf`` parameter as follows:
 
    .. code:: cpp
 
@@ -42,10 +29,12 @@ Consider a simple oneCCL ``allreduce`` example for CPU.
          send_buf[idx] = rank + 1;
       }
 
-3. ``allreduce`` invocation performs the reduction of values from all the processes and then distributes the result to all the processes. In this case, the result is an array with ``elem_count`` elements, where all elements are equal to the sum of arithmetical progression:
+   The ``allreduce`` invocation performs the reduction of values from all the processes and then distributes the result to all the processes. In this case, the result is an array with the ``elem_count`` elements, where all elements are equal to the sum of the arithmetical progression:
 
    .. math::
       p \cdot (p + 1) / 2
+
+#. Execute the ``allreduce`` operation:
 
    .. code:: cpp
 
@@ -54,8 +43,10 @@ Consider a simple oneCCL ``allreduce`` example for CPU.
                      elem_count,
                      reduction::sum,
                      comm).wait();
+                  
+   .. note:: The oneCCL operations are asynchronous and the memory buffers must remain intact until all operations are completed. You can free up memory associated with the buffers when an operation completes.
 
-4. Check the correctness of ``allreduce`` operation:
+#. Verify that the ``allreduce`` operation is correct:
 
    .. code:: cpp
 
@@ -68,3 +59,12 @@ Consider a simple oneCCL ``allreduce`` example for CPU.
                break;
          }
       }
+
+
+If you encounter an error, make sure the oneCCL environment is configured correctly.
+
+Additional Resources
+====================
+
+- `OneCCL Communicator <https://uxlfoundation.github.io/oneAPI-spec/spec/elements/oneCCL/source/spec/main_objects.html#communicator>`_
+- `OneCCL ALLREDUCE communication pattern <https://uxlfoundation.github.io/oneAPI-spec/spec/elements/oneCCL/source/spec/collective_operations.html#allreduce>`_

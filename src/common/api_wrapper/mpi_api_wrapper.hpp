@@ -98,6 +98,8 @@ typedef struct mpi_lib_ops {
     decltype(MPI_Type_free) *MPI_Type_free_ptr;
     decltype(MPI_Wait) *MPI_Wait_ptr;
     decltype(MPI_Waitall) *MPI_Waitall_ptr;
+    decltype(MPI_Type_size) *MPI_Type_size_ptr;
+    decltype(MPI_Comm_dup) *MPI_Comm_dup_ptr;
 } mpi_lib_ops_t;
 
 static std::vector<std::string> mpi_fn_names = {
@@ -175,6 +177,8 @@ static std::vector<std::string> mpi_fn_names = {
     "MPI_Type_free",
     "MPI_Wait",
     "MPI_Waitall",
+    "MPI_Type_size",
+    "MPI_Comm_dup",
 };
 
 extern ccl::mpi_lib_ops_t mpi_lib_ops;
@@ -337,9 +341,12 @@ extern ccl::mpi_lib_ops_t mpi_lib_ops;
 #define MPI_Type_free       ccl::mpi_lib_ops.MPI_Type_free_ptr
 #define MPI_Wait            ccl::mpi_lib_ops.MPI_Wait_ptr
 #define MPI_Waitall         ccl::mpi_lib_ops.MPI_Waitall_ptr
+#define MPI_Type_size       ccl::mpi_lib_ops.MPI_Type_size_ptr
+#define MPI_Comm_dup        ccl::mpi_lib_ops.MPI_Comm_dup_ptr
 
 bool mpi_api_init();
 void mpi_api_fini();
+const CCL_API mpi_lib_ops_t &get_mpi_lib_ops();
 
 } //namespace ccl
 

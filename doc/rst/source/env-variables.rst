@@ -929,8 +929,10 @@ oneCCL internally fills the algorithm selection table with appropriate defaults.
 
 To see the actual table values, set ``CCL_LOG_LEVEL=info``.
 
-SYCL PATH (Default with 2021.14)
-********************************
+SYCL PATH 
+**********
+
+.. note:: Starting with 2021.14, ``SYCL_PATH`` is the default environment variable that must be used.
 
 All collectives
 ===============
@@ -960,9 +962,9 @@ CCL_ENABLE_SYCL_KERNELS
 
 **Description**
 
-Setting this environment variable to ``1`` enables SYCL kernel-based implementations for ``ALLGATHERV``, ``ALLREDUCE``, and ``REDUCE_SCATTER``.
+Setting this environment variable to ``1`` enables SYCL kernel-based implementations for ``ALLGATHER``, ``ALLGATHERV``, ``ALLREDUCE``, ``REDUCE_SCATTER``, and ``ALLTOALL``.
 
-This new optimization optimizes all message sizes and supports the following data types:
+This optimization supports all message sizes and the following data types:
 
 * int32
 * fp32
@@ -1050,8 +1052,7 @@ CCL_SYCL_ALLGATHERV_SCALEOUT_THRESHOLD
 
 **Description** 
 
-For ``ALLGATHER``/ ``ALLGATHERV`` collectives, with the total message sizes below this threshold in bytes, the SYCL path is chosen to execute the collective operation. For message sizes exceeding this threshold, the implementation will switch to the Level Zero Path. The total message size is the number of bytes received from all participating processes. 
-
+For ``ALLGATHER``/ ``ALLGATHERV`` collectives, when ``send_count * #nodes`` is below this threshold in bytes, the SYCL path is chosen to execute the collective operation. For message sizes exceeding this threshold, the implementation will switch to the Level Zero Path. 
 
 ALLREDUCE
 =========
@@ -1109,7 +1110,7 @@ CCL_SYCL_ALLREDUCE_SMALL_THRESHOLD
 
 
 CCL_SYCL_ALLREDUCE_SCALEOUT_THRESHOLD   
--------------------------------------
+--------------------------------------
 
 **Syntax**
 
@@ -1126,7 +1127,7 @@ CCL_SYCL_ALLREDUCE_SCALEOUT_THRESHOLD
    * - <value>
      - Description
    * - ``>=0``
-     - Threshold in bytes to specify when scale-out allreduce uses SYCL kernel-based implementation. Default value is ``1048576``. 
+     - Threshold in bytes to specify when scale-out allreduce uses SYCL kernel-based implementation. Default value is ``4294967296`` (4GB in bytes). 
 
 **Description** 
 
@@ -1135,6 +1136,8 @@ For ``ALLREDUCE`` collectives, with message sizes below this threshold in bytes,
 
 CCL_SYCL_ALLREDUCE_SCALEOUT_DIRECT_THRESHOLD   
 --------------------------------------------
+
+.. note:: The ``CCL_SYCL_ALLREDUCE_SCALEOUT_DIRECT_THRESHOLD`` environment variable is available _only_ in 2021.14. Starting with 2021.15 and later, the variable is deprecated.
 
 **Syntax**
 
@@ -1156,6 +1159,44 @@ CCL_SYCL_ALLREDUCE_SCALEOUT_DIRECT_THRESHOLD
 **Description** 
 
 For allreduce collectives with message sizes below this threshold in bytes, ``MPI_Iallreduce`` direct algorithm is selected as scale-out phase of the colllective. For message sizes above this threshold and under the ``CCL_SYCL_ALLREDUCE_SCALEOUT_THRESHOLD``, the default algorithm (ring) is selected.
+
+
+CCL_SYCL_ALLREDUCE_SCALEOUT    
+---------------------------
+
+**Syntax**
+
+::
+
+  CCL_SYCL_ALLREDUCE_SCALEOUT=<value> 
+
+ 
+**Arguments**
+
+.. list-table::
+   :widths: 25 50
+   :align: left
+
+   * - <value>
+     - Description
+   * - ``auto``
+     - Default value. This value will be automatically selected.
+
+   * - ``direct``
+     - Based on ``MPI_Iallreduce``. 
+     
+   * - ``rabenseifner``
+     - Selects the Rabenseifner algorithm 
+
+   * - ``ring ``
+     - Ring implementation based on ring ``REDUCE_SCATTER`` followed by ring ``ALLGATHER``.
+    
+
+
+**Description** 
+
+Use this environment variable to specify the algorithm for ``ALLREDUCE``. Currently, the selected algorithm is used for all message sizes. 
+
 
 REDUCE_SCATTER
 ==============
@@ -1186,9 +1227,37 @@ CCL_SYCL_REDUCE_SCATTER_TMP_BUF
 
 Specifies if the ``REDUCE_SCATTER`` implementation should use a persistent temporary buffer or not. The implementation with temporary buffers makes the collective fully asynchronous, but adds some additional overhead due to the extra copy of the user buffer to a (persistent) temporary buffer. The current default uses Level Zero IPC support to avoid the copies to the temporary buffer. 
 
+CCL_SYCL_REDUCE_SCATTER_SMALL_THRESHOLD 
+---------------------------------------
+
+**Syntax**
+
+::
+
+  CCL_SYCL_REDUCE_SCATTER_SMALL_THRESHOLD=<value>  
+
+**Arguments**
+
+.. list-table::
+   :widths: 25 50
+   :align: left
+
+   * - <value>
+     - Description
+   * - ``>=0``
+     - Threshold in bytes to specify the small-size algorithm. Default value is ``2097152``.
+
+**Description** 
+
+``REDUCE_SCATTER`` collectives with message sizes smaller than the specified threshold will use an algorithm specialized for small-sized messages. 
+
+
 
 CCL_SYCL_REDUCE_SCATTER_SCALEOUT_DIRECT_THRESHOLD  
 -------------------------------------------------
+
+.. note:: The ``CCL_SYCL_REDUCE_SCATTER_SCALEOUT_DIRECT_THRESHOLD`` environment variable is available _only_ in 2021.14. Starting with 2021.15 and later, this variable is deprecated.
+
 
 **Syntax**
 
@@ -1213,6 +1282,40 @@ CCL_SYCL_REDUCE_SCATTER_SCALEOUT_DIRECT_THRESHOLD
 For reduce-scatter collectives with message sizes below this threshold in bytes, ``MPI_Ireduce_scatter`` direct algorithm is selected for the scale-out phase of the collective. For message sizes above this threshold and under the ``CCL_SYCL_REDUCE_SCATTER_SCALEOUT_THRESHOLD``, the default algorithm (ring) is selected. 
 
 
+CCL_SYCL_REDUCE_SCATTER_SCALEOUT
+--------------------------------
+
+
+**Syntax**
+
+::
+
+  CCL_SYCL_REDUCE_SCATTER_SCALEOUT=<value> 
+
+**Arguments**
+
+.. list-table::
+   :widths: 25 50
+   :align: left
+
+   * - <value>
+     - Description
+   * - ``auto``
+     - Default value. This value will be automatically selected. 
+
+   * - ``direct``
+     - Based on ``MPI_Ireduce_scatter``.
+
+   * - ``ring``
+     - Ring implementation.
+ 
+
+**Description** 
+
+Use this environment variable to specify the algorithm for ``REDUCE_SCATTER``. Currently, the selected algorithm is used for all message sizes. 
+
+ 
+
 CCL_SYCL_REDUCE_SCATTER_SCALEOUT_THRESHOLD  
 ------------------------------------------
 
@@ -1231,36 +1334,14 @@ CCL_SYCL_REDUCE_SCATTER_SCALEOUT_THRESHOLD
    * - <value>
      - Description
    * - ``>=0``
-     - Threshold in bytes to specify when scale-out ``REDUCE_SCATTER`` uses SYCL kernel-based implementation. Default value is ``4294967296``. 
+     - Threshold in bytes to specify when scale-out ``REDUCE_SCATTER`` uses SYCL kernel-based implementation. Default value is ``4294967296`` (4GB in bytes). 
  
 
 **Description** 
 
 For ``REDUCE_SCATTER`` collectives with message sizes below this threshold in bytes, the SYCL path is chosen to execute the collective operation. For message sizes exceeding this threshold, the implementation will switch to the Level Zero Path. 
 
-CCL_SYCL_REDUCE_SCATTER_SMALL_THRESHOLD 
----------------------------------------
 
-**Syntax**
-
-::
-
-  CCL_SYCL_REDUCE_SCATTER_SMALL_THRESHOLD=<value>  
-
-**Arguments**
-
-.. list-table::
-   :widths: 25 50
-   :align: left
-
-   * - <value>
-     - Description
-   * - ``>=0``
-     - Threshold in bytes to specify the small-size algorithm. Default value ``2097152``.
-
-**Description** 
-
-``REDUCE_SCATTER`` collectives with message sizes smaller than the specified threshold will use an algorithm specialized for small-sized messages. 
 
 
 Workers
@@ -1390,9 +1471,15 @@ CCL_KVS_MODE
    * - ``mpi``
      - MPI transport  
 
+   * - ``pmix_ofi``
+     - Enable PMIx operations (put/get/fence/commit) in the OFI transport path, bypassing the default KVS layer.
+
+   * - ``pmix_ofi_shm``
+     - An optimized variant of ``pmix_ofi`` that uses shared memory transfers for intra-node (scale-up) communication while retaining PMIx put/get/fence for scale-out. 
+
 **Description**
 
-Set the environment variable to specify the transport used to establish a connection between ranks during the oneCCL communicator creation. Currently, the ``mpi`` value is only supported when the MPI transport is used (see ``CCL_ATL_TRANSPORT``). For large scale runs, we recommend setting ``KVS_MODE`` to ``mpi``.
+Set the ``CCL_KVS_MODE`` environment variable to choose the key-value store mechanism used during communicator creation. For the MPI-based transport (``CCL_ATL_TRANSPORT=mpi``), use ``mpi``. For large-scale runs with the OFI transport and PMIx (``CCL_ATL_TRANSPORT=ofi`` and ``CCL_PROCESS_LAUNCHER=pmix``), we recommend using ``pmix_ofi`` or ``pmix_ofi_shm``. The ``pmix_ofi`` modes bypass the default KVS layer in favor of the PMIx operations (put/get/fence/commit) and can yield performance benefits, especially at scale. 
 
 ATL
 ###
@@ -1707,7 +1794,7 @@ CCL_ZE_CACHE_OPEN_IPC_HANDLES_THRESHOLD
 Use this environment variable to change the number of IPC
 handles opened with ``zeMemOpenIpcHandle()`` that oneCCL maintains in its receiving
 cache. IPC handles refer to `Level Zero Memory IPCs
-<https://spec.oneapi.io/level-zero/latest/core/PROG.html#memory-1>`_.
+<https://oneapi-src.github.io/level-zero-spec/level-zero/latest/core/PROG.html#memory-1>`_.
 
 The IPC handles opened with ``zeMemOpenIpcHandle()`` are stored by oneCCL in
 the receiving cache. However, when the number of opened IPC handles exceeds the

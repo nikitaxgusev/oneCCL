@@ -252,6 +252,8 @@ public:
     std::shared_ptr<ccl_atl_tag> tag_creator;
     static atl_attr_t attr;
 
+    virtual int get_mpi_comm() = 0;
+
 protected:
     void init_tag();
     void update_executor();

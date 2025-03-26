@@ -163,6 +163,14 @@ void run(ccl::communicator& service_comm,
                             if (iter_idx >= warmup_iter_count) {
                                 coll_time += coll_end_time - coll_start_time;
                                 wait_time += wait_end_time - wait_start_time;
+                                if (options.verbosity == 1) {
+                                    printf("rank: %d count: %ld iter_idx: %ld time: %f\n",
+                                           service_comm.rank(),
+                                           count,
+                                           iter_idx,
+                                           coll_end_time - coll_start_time + wait_end_time -
+                                               wait_start_time);
+                                }
                             }
 
                             if (options.check_values == CHECK_ALL_ITERS) {
@@ -380,9 +388,11 @@ int main(int argc, char* argv[]) {
 
     init_attr.buf_count = options.buf_count;
     init_attr.max_elem_count = options.max_elem_count;
+    init_attr.elem_offset = options.elem_offset;
     init_attr.ranks_per_proc = options.ranks_per_proc;
     init_attr.inplace = options.inplace;
     init_attr.numa_node = options.numa_node;
+    init_attr.verbosity = options.verbosity;
 #ifdef CCL_ENABLE_SYCL
     init_attr.sycl_mem_type = options.sycl_mem_type;
     init_attr.sycl_usm_type = options.sycl_usm_type;

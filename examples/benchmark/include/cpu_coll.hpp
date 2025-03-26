@@ -32,35 +32,69 @@ struct cpu_base_coll : base_coll, protected strategy {
               coll_strategy() {
         int result = 0;
 
+        send_allocations.reserve(base_coll::get_ranks_per_proc() * base_coll::get_buf_count());
+        recv_allocations.reserve(base_coll::get_ranks_per_proc() * base_coll::get_buf_count());
+
         size_t send_multiplier = coll_strategy::get_send_multiplier();
         size_t recv_multiplier = coll_strategy::get_recv_multiplier();
 
+        size_t send_bytes = base_coll::get_allocation_count() * sizeof(Dtype) * send_multiplier;
+        size_t recv_bytes = base_coll::get_allocation_count() * sizeof(Dtype) * recv_multiplier;
+
         for (size_t rank_idx = 0; rank_idx < base_coll::get_ranks_per_proc(); rank_idx++) {
             for (size_t idx = 0; idx < base_coll::get_buf_count(); idx++) {
-                send_bufs[idx][rank_idx] =
-                    alloc_buffer(base_coll::get_max_elem_count() * sizeof(Dtype) * send_multiplier);
-                if (base_coll::get_inplace()) {
+                void* send_buf = nullptr;
+                void* recv_buf = nullptr;
+                if (!base_coll::get_inplace()) {
+                    send_buf = alloc_buffer(send_bytes);
+                    recv_buf = alloc_buffer(recv_bytes);
+                    send_allocations.push_back(send_buf);
+                    recv_allocations.push_back(recv_buf);
+                }
+                else {
                     bool is_allgatherv = strcmp(coll_strategy::class_name(), "allgatherv") == 0;
                     bool is_allgather = strcmp(coll_strategy::class_name(), "allgather") == 0;
                     bool is_reduce_scatter =
                         strcmp(coll_strategy::class_name(), "reduce_scatter") == 0;
                     if (is_allgatherv || is_allgather) {
-                        recv_bufs[idx][rank_idx] = send_bufs[idx][rank_idx];
-                        send_bufs[idx][rank_idx] =
-                            nullptr; // This will be set when the count is known, since the offset is unknown at this point.
+                        // send_buf will be set when the count is known, since the offset is unknown at this point.
+                        send_buf = nullptr;
+                        recv_buf = alloc_buffer(recv_bytes);
+                        recv_allocations.push_back(recv_buf);
                     }
                     else if (is_reduce_scatter) {
                         // recv_buf will be set when the count is known, since the offset is unknown at this point.
-                        recv_bufs[idx][rank_idx] = nullptr;
+                        send_buf = alloc_buffer(send_bytes);
+                        recv_buf = nullptr;
+                        send_allocations.push_back(send_buf);
                     }
                     else {
-                        recv_bufs[idx][rank_idx] = send_bufs[idx][rank_idx];
+                        // need to be careful to push to correct allocation vector
+                        if (send_bytes > recv_bytes) {
+                            send_buf = alloc_buffer(send_bytes);
+                            recv_buf = send_buf;
+                            send_allocations.push_back(send_buf);
+                        }
+                        else {
+                            send_buf = alloc_buffer(recv_bytes);
+                            recv_buf = send_buf;
+                            recv_allocations.push_back(send_buf);
+                        }
                     }
                 }
-                else {
-                    recv_bufs[idx][rank_idx] = alloc_buffer(base_coll::get_max_elem_count() *
-                                                            sizeof(Dtype) * recv_multiplier);
+
+                // offset send_buf, original deallocated automatically by ~buf_allocator()
+                if (send_buf) {
+                    send_buf = static_cast<Dtype*>(send_buf) + base_coll::get_elem_offset();
                 }
+
+                // offset recv_buf, original deallocated automatically by ~buf_allocator()
+                if (recv_buf) {
+                    recv_buf = static_cast<Dtype*>(recv_buf) + base_coll::get_elem_offset();
+                }
+
+                send_bufs[idx][rank_idx] = send_buf;
+                recv_bufs[idx][rank_idx] = recv_buf;
             }
         }
 
@@ -72,17 +106,16 @@ struct cpu_base_coll : base_coll, protected strategy {
     virtual ~cpu_base_coll() {
         size_t send_multiplier = coll_strategy::get_send_multiplier();
         size_t recv_multiplier = coll_strategy::get_recv_multiplier();
-        for (size_t rank_idx = 0; rank_idx < base_coll::get_ranks_per_proc(); rank_idx++) {
-            for (size_t idx = 0; idx < base_coll::get_buf_count(); idx++) {
-                if (send_bufs[idx][rank_idx]) {
-                    free_buffer(send_bufs[idx][rank_idx],
-                                base_coll::get_max_elem_count() * sizeof(Dtype) * send_multiplier);
-                }
-                if (!base_coll::get_inplace()) {
-                    free_buffer(recv_bufs[idx][rank_idx],
-                                base_coll::get_max_elem_count() * sizeof(Dtype) * recv_multiplier);
-                }
-            }
+
+        size_t send_bytes = base_coll::get_allocation_count() * sizeof(Dtype) * send_multiplier;
+        size_t recv_bytes = base_coll::get_allocation_count() * sizeof(Dtype) * recv_multiplier;
+
+        for (void* send_buf : send_allocations) {
+            free_buffer(send_buf, send_bytes);
+        }
+
+        for (void* recv_buf : recv_allocations) {
+            free_buffer(recv_buf, recv_bytes);
         }
     }
 
@@ -195,4 +228,8 @@ struct cpu_base_coll : base_coll, protected strategy {
     ccl::datatype get_dtype() const override final {
         return get_ccl_dtype<Dtype>();
     }
+
+private:
+    std::vector<void*> send_allocations;
+    std::vector<void*> recv_allocations;
 };

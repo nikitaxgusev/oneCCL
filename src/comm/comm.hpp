@@ -100,6 +100,8 @@ private:
 };
 
 #ifdef CCL_ENABLE_SYCL
+constexpr size_t MAX_TILES = ccl::topo_manager::max_ranks_per_card;
+constexpr size_t MAX_GPUS = ccl::topo_manager::max_ranks_per_plane;
 constexpr size_t MAX_NODE_RANKS =
     ccl::topo_manager::max_ranks_per_card * ccl::topo_manager::max_ranks_per_plane;
 class alignas(CACHELINE_SIZE) ccl_comm_barrier_data {
@@ -151,6 +153,27 @@ public:
     }
 };
 
+struct alignas(CACHELINE_SIZE) ccl_large_tmp_bufs {
+    // three tmp buffers - 1: work_buf, 2: tmp_send_buf, 3: tmp_recv_buf
+    static constexpr int buf_count = 3;
+    // tmp_bufs are used as work buf and to copy input/output
+    std::array<void*, buf_count> tmp_bufs;
+    // ipc exchanged pointers to remote tmp buffers
+    std::array<void*, MAX_NODE_RANKS> remote_tmp_bufs[buf_count] = {};
+    std::array<void*, MAX_GPUS> remote_even_tmp_bufs[buf_count] = {};
+    std::array<void*, MAX_TILES> remote_pair_tmp_bufs[buf_count] = {};
+
+    ccl_large_tmp_bufs() {
+        // Explicitly zero-initialize all pointers
+        tmp_bufs.fill(nullptr);
+        for (int i = 0; i < buf_count; i++) {
+            remote_tmp_bufs[i].fill(nullptr);
+            remote_even_tmp_bufs[i].fill(nullptr);
+            remote_pair_tmp_bufs[i].fill(nullptr);
+        }
+    }
+};
+
 class alignas(CACHELINE_SIZE) ccl_tmp_bufs {
 public:
     // to avoid data race towards the end of a collective and starting of
@@ -193,8 +216,12 @@ private:
 
 class alignas(CACHELINE_SIZE) ccl_scaleout_host_bufs {
 public:
+    ccl_scaleout_host_bufs() = default;
     ~ccl_scaleout_host_bufs();
+    ccl_scaleout_host_bufs(const ccl_scaleout_host_bufs&) = delete;
+    ccl_scaleout_host_bufs& operator=(const ccl_scaleout_host_bufs&) = delete;
     void* get_scaleout_host_buf();
+    void put_scaleout_host_buf(const void* buf);
     size_t get_scaleout_host_buf_size();
 
 private:
@@ -225,6 +252,8 @@ private:
 
 class alignas(CACHELINE_SIZE) ccl_scaleout_pipeline_bufs {
 public:
+    static constexpr int num_chunk_buffs = 3;
+
     ccl_scaleout_pipeline_bufs() = default;
     ~ccl_scaleout_pipeline_bufs();
     ccl_scaleout_pipeline_bufs(const ccl_scaleout_pipeline_bufs& other);
@@ -242,7 +271,6 @@ public:
 private:
     void allocate_pipe_chunks(int num_bufs);
 
-    static constexpr int num_chunk_buffs = 3;
     void* send_pipe_buffer = NULL;
     void* send_pipe_chunks[num_chunk_buffs] = { NULL };
     void* recv_pipe_buffer = NULL;
@@ -259,6 +287,8 @@ public:
     ccl_internal_comm(const ccl_internal_comm& other) = delete;
     ccl_internal_comm& operator=(const ccl_internal_comm& other) = delete;
     ccl_internal_comm(int comm_id, int rank, int size, std::shared_ptr<atl_base_comm> comm);
+    // needed for multithreading (single process multiple devices) approach:
+    ccl_internal_comm(int comm_id, int rank, int size);
     ~ccl_internal_comm() = default;
 
     int rank() const noexcept {
@@ -305,8 +335,16 @@ public:
         m_tmp_buf.set_remote_tmp_bufs(ptrs, idx);
     }
 
+    ccl_large_tmp_bufs& get_large_tmp_bufs() {
+        return m_large_tmp_buf;
+    }
+
     void* get_scaleout_host_buf() {
         return m_scaleout_host_bufs.get_scaleout_host_buf();
+    }
+
+    void put_scaleout_host_buf(const void* buf) {
+        return m_scaleout_host_bufs.put_scaleout_host_buf(buf);
     }
 
     size_t get_scaleout_host_buf_size() {
@@ -355,6 +393,7 @@ private:
 #ifdef CCL_ENABLE_SYCL
     ccl_comm_barrier_data m_barrier_data;
     ccl_tmp_bufs m_tmp_buf;
+    ccl_large_tmp_bufs m_large_tmp_buf{};
     ccl_scaleout_host_bufs m_scaleout_host_bufs;
     ccl_scaleout_device_bufs m_scaleout_device_bufs;
     // for sycl pipeline sendrecv
@@ -366,19 +405,28 @@ private:
 class alignas(CACHELINE_SIZE) ccl_comm : public ccl::comm_interface {
 public:
     static constexpr int invalid_rank = -1;
+    static constexpr int invalid_size = -1;
+    static constexpr int invalid_id = -1;
 
     void init(int comm_id,
               const std::shared_ptr<atl_base_comm>& atl_comm,
               bool share_resources = false,
               bool is_sub_communicator = false);
+    // common usage: support processes and threads
     ccl_comm(int comm_id,
              std::shared_ptr<atl_base_comm> atl_comm,
              bool share_resources,
-             bool is_sub_communicator);
+             bool is_sub_communicator,
+             bool is_Ext = false,
+             int size = invalid_size,
+             int rank = invalid_rank,
+             int group_id = 0);
     ccl_comm(std::shared_ptr<atl_base_comm> atl_comm,
              bool share_resources = false,
              bool is_sub_communicator = false);
     ccl_comm();
+    // needed for multithreading (single process multiple devices) approach:
+    ccl_comm(int size, int rank);
 
     ccl_comm(ccl_comm& src) = delete;
     ccl_comm(ccl_comm&& src) = default;
@@ -402,15 +450,40 @@ public:
     static ccl_comm* create(int size, int rank, ccl::shared_ptr_class<ccl::kvs_interface> kvs);
     static ccl_comm* create(int size, ccl::shared_ptr_class<ccl::kvs_interface> kvs);
 
+    // needed for multithreading (single process multiple devices) approach:
+    void initExt(int size,
+                 int rank,
+                 int comm_id,
+                 std::shared_ptr<atl_base_comm> atl_comm,
+                 bool share_resources = false,
+                 bool is_sub_communicator = false,
+                 int group_id = 0);
+    static ccl_comm* createExt(device_t device,
+                               context_t context,
+                               int size,
+                               int rank,
+                               ccl::shared_ptr_class<ccl::kvs_interface> kvs);
+    static ccl_comm* createExt(int size, int rank, ccl::shared_ptr_class<ccl::kvs_interface> kvs);
+    static ccl_comm* createExt(int size, ccl::shared_ptr_class<ccl::kvs_interface> kvs);
+
 private:
-    ccl_comm(device_t device, context_t context, std::shared_ptr<atl_base_comm> atl_comm);
+    // common usage: support processes and threads
+    ccl_comm(device_t device,
+             context_t context,
+             std::shared_ptr<atl_base_comm> atl_comm,
+             bool is_Ext = false,
+             int size = invalid_size,
+             int rank = invalid_rank,
+             int group_id = 0);
     ccl_comm(int size, int rank, ccl::shared_ptr_class<ikvs_wrapper> kvs);
     ccl_comm(int size, ccl::shared_ptr_class<ikvs_wrapper> kvs);
 
     // copy-constructor with explicit comm_id
     ccl_comm(const ccl_comm& src, int comm_id);
 
-    void create_topo_subcomms();
+    void create_topo_subcomms(std::shared_ptr<atl_base_comm> atl_comm);
+    // needed for multithreading (single process multiple devices) approach:
+    void create_topo_subcommsExt(int size, int rank);
 
     ccl_comm* get_impl() {
         return this;
@@ -420,12 +493,16 @@ private:
 
 public:
     ccl_comm* create_subcomm(int color, int key = 0) const;
+    ccl_comm* create_subcomm_split_independent(int color, int key);
+    // needed for multithreading (single process multiple devices) approach:
+    ccl_comm* create_subcommExt(int size, int rank) const;
+    ccl_comm* create_subcommExt(const std::vector<int>& colors, int rank, int key) const;
 
     std::shared_ptr<ccl_comm> clone_with_new_id(int comm_id);
 
     void allocate_resources();
 
-    ccl::comm_interface_ptr split(const ccl::comm_split_attr& attr) override;
+    ccl::comm_interface_ptr split(int color, int key, bool split_external_use = false) override;
 
     std::string to_string() const;
     std::string to_string_ext() const;
@@ -463,6 +540,11 @@ public:
 
     int get_comm_id() const {
         return comm_impl->atl_comm->get_comm_id();
+    }
+
+    // needed for multithreading (single process multiple devices) approach:
+    int get_comm_idExt(int idx) const {
+        return idx;
     }
 
     std::shared_ptr<ccl_comm> get_r2r_comm() const {
@@ -574,8 +656,15 @@ public:
         comm_impl->set_remote_tmp_bufs(ptrs, idx);
     }
 
+    ccl_large_tmp_bufs& get_large_tmp_bufs() {
+        return comm_impl->get_large_tmp_bufs();
+    }
+
     void* get_scaleout_host_buf() {
         return comm_impl->get_scaleout_host_buf();
+    }
+    void put_scaleout_host_buf(const void* buf) {
+        return comm_impl->put_scaleout_host_buf(buf);
     }
     size_t get_scaleout_host_buf_size() {
         return comm_impl->get_scaleout_host_buf_size();
@@ -607,6 +696,9 @@ public:
     atl_req_t& get_pipeline_recv_req() {
         return comm_impl->get_pipeline_recv_req();
     }
+    bool is_multi_thread_instance() {
+        return enable_multi_thread_instance;
+    }
 
 #endif // CCL_ENABLE_SYCL
 
@@ -625,6 +717,7 @@ public:
 
     COMM_IMPL_DECLARATION;
     COMM_IMPL_CLASS_DECLARATION
+    int global_current_id = invalid_id;
 
 private:
     // this is an internal part of the communicator
@@ -650,6 +743,7 @@ private:
     // through the shared_ptr indirection
     int comm_rank;
     int comm_size;
+    bool enable_multi_thread_instance{ false };
 
     ccl_rank2rank_map local2global_map{};
     ccl::topo_manager topo_manager;
@@ -659,7 +753,7 @@ private:
     void init_ipc_exchange_mode(std::shared_ptr<ccl_comm> comm);
 #endif // CCL_ENABLE_SYCL && CCL_ENABLE_ZE
 
-    ccl_sched_id_t next_sched_id_internal;
-    ccl_sched_id_t next_sched_id_external;
+    ccl_sched_id_t next_sched_id_internal{};
+    ccl_sched_id_t next_sched_id_external{};
 
 }; // class ccl_comm

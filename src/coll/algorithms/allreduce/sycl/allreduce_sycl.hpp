@@ -15,6 +15,9 @@
 */
 #pragma once
 
+#include "coll/algorithms/utils/sycl_coll_base.hpp"
+#include "coll/algorithms/utils/sycl_selection.hpp"
+
 #define SYCL_ALLREDUCE_FUNCTIONS(MSGSIZE) \
     void init_allreduce_##MSGSIZE(ccl::datatype dtype, \
                                   sycl::queue& queue, \
@@ -37,7 +40,6 @@ SYCL_ALLREDUCE_FUNCTIONS(large)
 namespace ccl {
 
 namespace v1 {
-
 event allreduce_sycl(sycl::queue& q,
                      const void* send_buf,
                      void* recv_buf,
@@ -80,6 +82,7 @@ ccl::event allreduce_scaleout_sycl(sycl::queue& q,
                                    ccl::reduction reduction,
                                    ccl_comm* comm,
                                    const ccl::vector_class<ccl::event>& deps,
+                                   bool original_deps,
+                                   sycl_allreduce_tune_attr tune_attr,
                                    bool& done,
-                                   bool direct,
                                    bool is_cpu_buffers = false);

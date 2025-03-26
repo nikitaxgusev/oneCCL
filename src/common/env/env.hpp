@@ -71,6 +71,21 @@ enum class process_launcher_mode {
     none
 };
 
+enum ccl_selection_border_type {
+    ccl_selection_border_left,
+    ccl_selection_border_right,
+    ccl_selection_border_both
+};
+
+template <typename algo_group_type>
+using ccl_selection_table_t =
+    std::map<size_t, std::pair<algo_group_type, ccl_selection_border_type>>;
+
+enum class ccl_sycl_alltoall_protocol {
+    read,
+    write
+};
+
 namespace ccl {
 
 class env_data {
@@ -85,7 +100,7 @@ public:
     env_data& operator=(env_data&&) = delete;
 
     void parse();
-    void print(int rank);
+    void print(int rank, bool is_mt_enabled = false);
     void set_internal_env();
 
     bool was_printed;
@@ -120,6 +135,10 @@ public:
     bool enable_sync_coll;
     bool enable_extra_ep;
     bool enable_auto_cache;
+#if defined(CCL_ENABLE_MPI) && defined(CCL_ENABLE_OMP)
+    bool enable_omp_allreduce;
+    std::string omp_allreduce_num_threads;
+#endif // CCL_ENABLE_MPI && CCL_ENABLE_OMP
 
     atl_mnic_t mnic_type;
     std::string mnic_name_raw;
@@ -131,6 +150,8 @@ public:
        so hide it inside algorithm_selector module
        and store only raw strings in env_data
     */
+    std::shared_ptr<ccl_selection_table_t<ccl_coll_recv_algo>> fallback_recv, store_fallback_recv;
+    std::shared_ptr<ccl_selection_table_t<ccl_coll_send_algo>> fallback_send, store_fallback_send;
     bool enable_algo_fallback;
     // main algorithm selection
     std::string allgather_algo_raw;
@@ -177,6 +198,8 @@ public:
     bool enable_strict_order;
     ccl_staging_buffer staging_buffer;
     bool enable_op_sync;
+    bool enable_hostname_sharing;
+    bool enable_init_hostname_sharing;
 
     size_t chunk_count;
     size_t min_chunk_size;
@@ -206,13 +229,13 @@ public:
     size_t sycl_allreduce_small_threshold;
     size_t sycl_allreduce_medium_threshold;
     size_t sycl_allreduce_scaleout_threshold;
-    size_t sycl_allreduce_scaleout_direct_threshold;
+    std::string sycl_allreduce_scaleout_algo;
 
     bool sycl_reduce_scatter_tmp_buf;
     size_t sycl_reduce_scatter_small_threshold;
     size_t sycl_reduce_scatter_medium_threshold;
     size_t sycl_reduce_scatter_scaleout_threshold;
-    size_t sycl_reduce_scatter_scaleout_direct_threshold;
+    std::string sycl_reduce_scatter_scaleout_algo;
 
     bool sycl_allgatherv_tmp_buf;
     size_t sycl_allgatherv_small_threshold;
@@ -233,7 +256,8 @@ public:
     size_t sycl_scaleout_host_buf_size;
     size_t sycl_scaleout_device_buf_size;
     size_t sycl_kernels_line_size;
-    size_t sycl_pipeline_chunk_size;
+    size_t sycl_max_pipeline_chunk_size;
+    ssize_t sycl_pipeline_chunk_size;
     bool sycl_enable_pipeline_gpu_rdma;
     bool sycl_enable_direct_gpu_rdma;
     bool sycl_sub_communicator;
@@ -264,6 +288,8 @@ public:
     int enable_p2p_access;
     bool enable_fabric_vertex_connection_check;
     bool enable_wa_fabric_vertex_connection_check;
+    bool use_mpi_bcast_wa;
+    bool use_root_print_wa;
 
 #ifdef CCL_ENABLE_MPI
     std::string mpi_lib_path;
@@ -271,6 +297,11 @@ public:
     bool mpi_fp16_native;
 #endif // CCL_ENABLE_MPI
     std::string ofi_lib_path;
+
+#if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE) && defined(CCL_ENABLE_UMF)
+    int umf_enable;
+    std::string umf_lib_path;
+#endif // CCL_ENABLE_SYCL && CCL_ENABLE_ZE && CCL_ENABLE_UMF
 
 #ifdef CCL_ENABLE_SYCL
     std::string kernel_path;
@@ -325,6 +356,7 @@ public:
     bool ze_enable;
     bool ze_fini_wa;
     bool ze_multi_workers;
+    ccl_sycl_alltoall_protocol sycl_alltoall_protocol;
     bool enable_ze_auto_tune_ports;
     ccl::ze::ipc_exchange_mode ze_ipc_exchange;
     bool ze_drm_bdf_support;
@@ -333,6 +365,7 @@ public:
     std::string drmfd_dev_render_dir_path;
     std::string drmfd_dev_render_suffix;
 #endif // CCL_ENABLE_SYCL
+    bool ipc_allgatherv_wa;
 
 #ifdef CCL_ENABLE_PMIX
     std::string pmix_lib_path;

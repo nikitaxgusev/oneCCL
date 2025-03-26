@@ -14,6 +14,7 @@
  limitations under the License.
 */
 #include "coll/algorithms/utils/sycl_selection.hpp"
+#include "coll/algorithms/utils/sycl_coll_base.hpp"
 
 bool can_use_sycl_kernels(const ccl_selector_param& param) {
 // TODO: mitigate overhead added by can_use_sycl_kernels
@@ -22,7 +23,11 @@ bool can_use_sycl_kernels(const ccl_selector_param& param) {
 #else // CCL_ENABLE_SYCL
     return false;
 #endif // CCL_ENABLE_SYCL
-    auto supported_colls = { ccl_coll_allgatherv, ccl_coll_allreduce, ccl_coll_reduce_scatter };
+    auto supported_colls = { ccl_coll_allgather,
+                             ccl_coll_allgatherv,
+                             ccl_coll_alltoall,
+                             ccl_coll_allreduce,
+                             ccl_coll_reduce_scatter };
     RETURN_FALSE_IF(!checkers::is_coll_supported(supported_colls, param.ctype),
                     "coll is not supported");
 
@@ -32,7 +37,16 @@ bool can_use_sycl_kernels(const ccl_selector_param& param) {
     CCL_THROW_IF_NOT(param.peer_rank == CCL_INVALID_PEER_RANK_IDX, "unexpected peer_rank value");
     CCL_THROW_IF_NOT(!param.is_scaleout, "unexpected is_scaleout value");
 
-    size_t local_proc_count = ccl::global_data::get().get_local_proc_count();
+    // TODO: it is incorrect and should be revisited
+    if (param.comm->is_multi_thread_instance() == true) {
+        return true;
+    }
+
+    size_t local_proc_count = param.comm->size();
+    if (param.comm->is_multi_thread_instance() != true) {
+        local_proc_count = ccl::global_data::get().get_local_proc_count();
+    }
+
     LOG_DEBUG("coll ",
               ccl_coll_type_to_str(param.ctype),
               ", local_proc_count ",
@@ -62,6 +76,9 @@ bool can_use_sycl_kernels(const ccl_selector_param& param) {
 #ifdef CCL_ENABLE_SYCL
     // it hangs if we try to use sycl kernels without ze cache
     RETURN_FALSE_IF(ccl::global_data::env().enable_ze_cache == 0, "ze cache is not enabled");
+    RETURN_FALSE_IF(param.comm->get_pair_comm()->size() > 2,
+                    "unsupported pair_comm size: ",
+                    param.comm->get_pair_comm()->size());
     RETURN_FALSE_IF(!param.comm->get_topo_manager().has_p2p_access(),
                     "no p2p access between devices");
     RETURN_FALSE_IF(!param.comm->get_topo_manager().has_all_vertices_connected(),
@@ -94,8 +111,21 @@ bool can_use_sycl_kernels(const ccl_selector_param& param) {
                         " is specified explicitly as: ",
                         ccl::global_data::env().allreduce_algo_raw,
                         " not supported");
-        RETURN_FALSE_IF(param.reduction != ccl::reduction::sum,
-                        "Allreduce only supports sum reduction");
+        RETURN_FALSE_IF(
+            param.reduction != ccl::reduction::sum &&
+                (param.reduction != ccl::reduction::avg || ccl::global_data::env().sycl_esimd),
+            "Allreduce only supports sum/avg reductions");
+    }
+
+    // Conditions specific to allgather
+    if (param.ctype == ccl_coll_allgather) {
+        RETURN_FALSE_IF(!ccl::global_data::env().allgather_algo_raw.empty() &&
+                            ccl::global_data::env().allgather_algo_raw != "topo",
+                        "algo of coll: ",
+                        ccl_coll_type_to_str(param.ctype),
+                        " is specified explicitly as: ",
+                        ccl::global_data::env().allgather_algo_raw,
+                        " not supported");
     }
 
     // Conditions specific to allgatherv
@@ -106,6 +136,41 @@ bool can_use_sycl_kernels(const ccl_selector_param& param) {
                         ccl_coll_type_to_str(param.ctype),
                         " is specified explicitly as: ",
                         ccl::global_data::env().allgatherv_algo_raw,
+                        " not supported");
+
+        for (int i = 0; i < param.comm->size(); i++) {
+            RETURN_FALSE_IF(
+                param.recv_counts[i] != param.count,
+                "Allgatherv Sycl kernel is called with non-equal receive counts, fallback to schedule-based implementation");
+        }
+    }
+
+    // Conditions specific to both allgather/allgatherv
+    if (param.ctype == ccl_coll_allgatherv || param.ctype == ccl_coll_allgather) {
+        if (!is_single_node) {
+            RETURN_FALSE_IF(
+                ccl::global_data::env().atl_transport == ccl_atl_ofi,
+                "SYCL based Allgather/Allgatherv in multiple node mode supports only MPI transport");
+
+            ccl_comm* r2r_comm = param.comm->get_r2r_comm().get();
+            // Since SYCL based Allgatherv supports only equal receive counts,
+            // (send_count == recv_counts[i]) we can simplify the operation
+            size_t scaleout_count = r2r_comm->size() * param.count;
+            RETURN_FALSE_IF(scaleout_count * param.dtype.size() >
+                                ccl::global_data::env().sycl_allgatherv_scaleout_threshold,
+                            "The total amount of data for SYCL based Allgather/Allgatherv",
+                            " exceeds the threshold for multiple node mode");
+        }
+    }
+
+    // Conditions specific to alltoall
+    if (param.ctype == ccl_coll_alltoall) {
+        RETURN_FALSE_IF(!ccl::global_data::env().alltoall_algo_raw.empty() &&
+                            ccl::global_data::env().alltoall_algo_raw != "topo",
+                        "algo of coll: ",
+                        ccl_coll_type_to_str(param.ctype),
+                        " is specified explicitly as: ",
+                        ccl::global_data::env().alltoall_algo_raw,
                         " not supported");
     }
 
@@ -118,8 +183,10 @@ bool can_use_sycl_kernels(const ccl_selector_param& param) {
                         " is specified explicitly as: ",
                         ccl::global_data::env().reduce_scatter_algo_raw,
                         " not supported");
-        RETURN_FALSE_IF(param.reduction != ccl::reduction::sum,
-                        "Reduce_scatter only supports sum reduction");
+        RETURN_FALSE_IF(
+            param.reduction != ccl::reduction::sum &&
+                (param.reduction != ccl::reduction::avg || ccl::global_data::env().sycl_esimd),
+            "Reduce_scatter only supports sum/avg reductions");
     }
 
     if (!ccl::global_data::env().disable_ze_port_check) {
@@ -152,4 +219,252 @@ bool can_use_sycl_kernels(const ccl_selector_param& param) {
     LOG_DEBUG("selected algo: coll ", ccl_coll_type_to_str(param.ctype), ", algo ", "topo sycl");
 
     return true;
+}
+
+size_t allreduce_select_chunk_size(allreduce_scaleout_algo algo, size_t size, size_t comm_size) {
+    // read defaults and user input
+    size_t max_pipeline_chunk_size = ccl::global_data::env().sycl_max_pipeline_chunk_size;
+    ssize_t env_pipeline_chunk_size = ccl::global_data::env().sycl_pipeline_chunk_size;
+    size_t auto_pipeline_chunk_size = 2 * 1024 * 1024;
+    // respect user input
+    if (env_pipeline_chunk_size != CCL_ENV_SIZET_NOT_SPECIFIED) {
+        return std::min((size_t)env_pipeline_chunk_size, max_pipeline_chunk_size);
+    }
+    // auto tuning, based on the latest perf measurements
+    switch (algo) {
+        case allreduce_scaleout_algo::rabenseifner:
+            if (size >= 1024L * 1024 * 1024)
+                auto_pipeline_chunk_size = 32 * 1024 * 1024;
+            else if (size >= 256L * 1024 * 1024)
+                auto_pipeline_chunk_size = 16 * 1024 * 1024;
+            else
+                auto_pipeline_chunk_size = 8 * 1024 * 1024;
+            break;
+        case allreduce_scaleout_algo::ring:
+            if (size >= 1024L * 1024 * 1024)
+                auto_pipeline_chunk_size = 32 * 1024 * 1024;
+            else if (size >= 256L * 1024 * 1024)
+                auto_pipeline_chunk_size = 16 * 1024 * 1024;
+            else
+                auto_pipeline_chunk_size = comm_size <= 8 ? 4 * 1024 * 1024 : 8 * 1024 * 1024;
+            break;
+        case allreduce_scaleout_algo::direct:
+            LOG_WARN("direct alogrithm is not supporting pipeline chunk size tuning");
+            break;
+    }
+    // error protection
+    return std::min(auto_pipeline_chunk_size, max_pipeline_chunk_size);
+}
+
+static sycl_allreduce_tune_attr allreduce_select_large_algorithm(size_t size, size_t comm_size) {
+    if (is_pof2(comm_size)) {
+        size_t raben_chunk_size =
+            allreduce_select_chunk_size(allreduce_scaleout_algo::rabenseifner, size, comm_size);
+        return { allreduce_scaleout_algo::rabenseifner, raben_chunk_size };
+    }
+    // TODO: do the performance analysis of larger scale ring problems
+    if (comm_size <= 16) {
+        size_t ring_chunk_size =
+            allreduce_select_chunk_size(allreduce_scaleout_algo::ring, size, comm_size);
+        return { allreduce_scaleout_algo::ring, ring_chunk_size };
+    }
+    // no other choices left
+    // TODO: for OFI case, we shouldn't select direct, but fallback
+    // to the scheduler. Currently, in case of OFI transport,
+    // we fallback to the scheduler at the very beginning of scale-out func.
+    return { allreduce_scaleout_algo::direct };
+}
+
+// TODO: collect larger scale to enable >64 nodes selection
+static sycl_allreduce_tune_attr allreduce_auto_select_tune_attr(size_t size,
+                                                                size_t comm_size,
+                                                                ccl_datatype ccl_dtype) {
+    // small message size
+    // direct is the best option based on the latest perf results
+    // and message/comm size ranges
+    if (ccl::global_data::env().atl_transport != ccl_atl_ofi) {
+        if (ccl_dtype == ccl::datatype::float16) {
+            // half precision data types: fp16
+            if (comm_size <= 8 && size <= 512 * 1024) {
+                return { allreduce_scaleout_algo::direct };
+            }
+            if (comm_size > 8 && size <= 1024 * 1024) {
+                return { allreduce_scaleout_algo::direct };
+            }
+        }
+        else if (ccl_dtype == ccl::datatype::bfloat16) {
+            // half precision data types: bf16
+            if (comm_size <= 8 && size <= 1024 * 1024) {
+                return { allreduce_scaleout_algo::direct };
+            }
+            if (comm_size > 8 && size <= 4 * 1024 * 1024) {
+                return { allreduce_scaleout_algo::direct };
+            }
+        }
+        else {
+            // full precision data types and other
+            if (size <= 4 * 1024 * 1024) {
+                return { allreduce_scaleout_algo::direct };
+            }
+        }
+    }
+    // medium/large message size
+    if (comm_size <= 64) {
+        return allreduce_select_large_algorithm(size, comm_size);
+    }
+    // default/other cases, larger scale
+    if (ccl::global_data::env().atl_transport != ccl_atl_ofi) {
+        return { allreduce_scaleout_algo::direct };
+    }
+    else {
+        return allreduce_select_large_algorithm(size, comm_size);
+    }
+}
+
+// TODO: work on selection framework MLSL-3253
+sycl_allreduce_tune_attr allreduce_select_tune_attr(size_t size,
+                                                    size_t comm_size,
+                                                    ccl_datatype ccl_dtype) {
+    if (ccl::global_data::env().sycl_allreduce_scaleout_algo == "auto") {
+        return allreduce_auto_select_tune_attr(size, comm_size, ccl_dtype);
+    }
+    if (ccl::global_data::env().sycl_allreduce_scaleout_algo == "direct") {
+        return { allreduce_scaleout_algo::direct };
+    }
+    if (ccl::global_data::env().sycl_allreduce_scaleout_algo == "rabenseifner") {
+        size_t chunk_size =
+            allreduce_select_chunk_size(allreduce_scaleout_algo::rabenseifner, size, comm_size);
+        return { allreduce_scaleout_algo::rabenseifner, chunk_size };
+    }
+    if (ccl::global_data::env().sycl_allreduce_scaleout_algo == "ring") {
+        size_t chunk_size =
+            allreduce_select_chunk_size(allreduce_scaleout_algo::ring, size, comm_size);
+        return { allreduce_scaleout_algo::ring, chunk_size };
+    }
+    CCL_THROW("unsupported selection");
+}
+
+// reduce-scatter
+size_t reduce_scatter_select_chunk_size(reduce_scatter_scaleout_algo algo,
+                                        size_t size,
+                                        size_t comm_size) {
+    // read defaults and user input
+    size_t max_pipeline_chunk_size = ccl::global_data::env().sycl_max_pipeline_chunk_size;
+    ssize_t env_pipeline_chunk_size = ccl::global_data::env().sycl_pipeline_chunk_size;
+    size_t auto_pipeline_chunk_size = 2 * 1024 * 1024;
+    // respect user input
+    if (env_pipeline_chunk_size != CCL_ENV_SIZET_NOT_SPECIFIED) {
+        return std::min((size_t)env_pipeline_chunk_size, max_pipeline_chunk_size);
+    }
+    // auto tuning, based on the latest perf measurements
+    switch (algo) {
+        case reduce_scatter_scaleout_algo::ring:
+            if (comm_size >= 16)
+                auto_pipeline_chunk_size = 8 * 1024 * 1024;
+            else if (comm_size >= 4)
+                auto_pipeline_chunk_size = 4 * 1024 * 1024;
+            else
+                auto_pipeline_chunk_size = 2 * 1024 * 1024;
+            break;
+        case reduce_scatter_scaleout_algo::direct:
+            LOG_WARN("direct alogrithm is not supporting pipeline chunk size tuning");
+            break;
+    }
+    // error protection
+    return std::min(auto_pipeline_chunk_size, max_pipeline_chunk_size);
+}
+
+static sycl_reduce_scatter_tune_attr reduce_scatter_select_large_algorithm(size_t size,
+                                                                           size_t comm_size) {
+    // TODO: do the performance analysis of larger scale ring problems
+    if (comm_size <= 16) {
+        size_t ring_chunk_size =
+            reduce_scatter_select_chunk_size(reduce_scatter_scaleout_algo::ring, size, comm_size);
+        return { reduce_scatter_scaleout_algo::ring, ring_chunk_size };
+    }
+    // no other choices left
+    // TODO: for OFI case, we shouldn't select direct, but fallback
+    // to the scheduler. Currently, in case of OFI transport,
+    // we fallback to the scheduler at the very beginning of scale-out func.
+    return { reduce_scatter_scaleout_algo::direct };
+}
+
+static sycl_reduce_scatter_tune_attr reduce_scatter_auto_select_tune_attr(size_t size,
+                                                                          size_t comm_size,
+                                                                          ccl_datatype ccl_dtype) {
+    // small message size
+    // direct is the best option based on the latest perf results
+    // and message/comm size ranges
+    if (ccl::global_data::env().atl_transport != ccl_atl_ofi) {
+        if (ccl_dtype == ccl::datatype::float16) {
+            // half precision data types: fp16
+            if (comm_size <= 8 && size <= 1024 * 1024) {
+                return { reduce_scatter_scaleout_algo::direct };
+            }
+            if (comm_size > 8 && size <= 1024 * 1024) {
+                return { reduce_scatter_scaleout_algo::direct };
+            }
+        }
+        else if (ccl_dtype == ccl::datatype::bfloat16) {
+            // half precision data types: bf16
+            if (comm_size <= 8 && size <= 1024 * 1024) {
+                return { reduce_scatter_scaleout_algo::direct };
+            }
+            if (comm_size > 8 && size <= 1 * 1024 * 1024) {
+                return { reduce_scatter_scaleout_algo::direct };
+            }
+        }
+        else {
+            // full precision data types and other
+            if (size <= 1 * 1024 * 1024) {
+                return { reduce_scatter_scaleout_algo::direct };
+            }
+        }
+    }
+    // medium/large message size
+    if (comm_size <= 64) {
+        return reduce_scatter_select_large_algorithm(size, comm_size);
+    }
+    // default/other cases, larger scale
+    if (ccl::global_data::env().atl_transport != ccl_atl_ofi) {
+        return { reduce_scatter_scaleout_algo::direct };
+    }
+    else {
+        return reduce_scatter_select_large_algorithm(size, comm_size);
+    }
+}
+
+sycl_reduce_scatter_tune_attr reduce_scatter_select_tune_attr(size_t size,
+                                                              size_t comm_size,
+                                                              ccl_datatype ccl_dtype) {
+    if (ccl::global_data::env().sycl_reduce_scatter_scaleout_algo == "auto") {
+        return reduce_scatter_auto_select_tune_attr(size, comm_size, ccl_dtype);
+    }
+    if (ccl::global_data::env().sycl_reduce_scatter_scaleout_algo == "direct") {
+        return { reduce_scatter_scaleout_algo::direct };
+    }
+    if (ccl::global_data::env().sycl_reduce_scatter_scaleout_algo == "ring") {
+        size_t chunk_size =
+            reduce_scatter_select_chunk_size(reduce_scatter_scaleout_algo::ring, size, comm_size);
+        return { reduce_scatter_scaleout_algo::ring, chunk_size };
+    }
+    CCL_THROW("unsupported reduce-scatter algo selection");
+}
+
+// allgatherv
+size_t default_select_chunk_size() {
+    // read defaults and user input
+    size_t max_pipeline_chunk_size = ccl::global_data::env().sycl_max_pipeline_chunk_size;
+    ssize_t env_pipeline_chunk_size = ccl::global_data::env().sycl_pipeline_chunk_size;
+    size_t auto_pipeline_chunk_size = 2 * 1024 * 1024;
+    // respect user input
+    if (env_pipeline_chunk_size != CCL_ENV_SIZET_NOT_SPECIFIED) {
+        return std::min((size_t)env_pipeline_chunk_size, max_pipeline_chunk_size);
+    }
+    // error protection
+    return std::min(auto_pipeline_chunk_size, max_pipeline_chunk_size);
+}
+
+size_t allgatherv_select_chunk_size() {
+    return default_select_chunk_size();
 }

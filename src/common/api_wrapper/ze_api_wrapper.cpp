@@ -39,10 +39,11 @@ bool ze_api_init() {
     }
     LOG_DEBUG("level-zero lib path: ", ze_lib_info.path);
 
-    load_library(ze_lib_info);
-    if (!ze_lib_info.handle)
+    int error = load_library(ze_lib_info);
+    if (error != CCL_LOAD_LB_SUCCESS) {
+        print_error(error, ze_lib_info);
         ret = false;
-
+    }
     return ret;
 }
 

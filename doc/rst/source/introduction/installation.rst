@@ -4,9 +4,9 @@
 .. _tgz_file: https://github.com/oneapi-src/oneCCL/releases
 .. highlight:: bash
 
-==================
-Installation Guide
-==================
+==========================
+Install oneCCL from Source
+==========================
 
 Install and configure the |product_full| (|product_short|) on your system.
 |product_short| supports different installation scenarios using command line interface (CLI).
@@ -16,8 +16,8 @@ System Requirements
 
 Ensure your system meets the hardware and software requirements before starting with installing oneCCL. See |sys_req|_ to learn about hardware and software requirements for |product_short|.
 
-Installation using Command Line Interface
-*****************************************
+Installation using CLI
+**********************
 
 To install |product_short| using command line interface (CLI), follow these steps:
 

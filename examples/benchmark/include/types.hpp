@@ -133,11 +133,13 @@ typedef struct user_options_t {
     size_t min_elem_count;
     size_t max_elem_count;
     std::list<size_t> elem_counts;
+    size_t elem_offset;
     check_values_t check_values;
     int cache_ops;
     int inplace;
     size_t ranks_per_proc; // not exposed in bench options
     int numa_node;
+    int verbosity;
 #ifdef CCL_ENABLE_SYCL
     sycl_dev_type_t sycl_dev_type;
     int sycl_root_dev;
@@ -164,11 +166,13 @@ typedef struct user_options_t {
         min_elem_count = DEFAULT_MIN_ELEM_COUNT;
         max_elem_count = DEFAULT_MAX_ELEM_COUNT;
         generate_counts(elem_counts, min_elem_count, max_elem_count);
+        elem_offset = DEFAULT_ELEM_OFFSET;
         check_values = DEFAULT_CHECK_VALUES;
         cache_ops = DEFAULT_CACHE_OPS;
         inplace = DEFAULT_INPLACE;
         ranks_per_proc = DEFAULT_RANKS_PER_PROC;
         numa_node = DEFAULT_NUMA_NODE;
+        verbosity = DEFAULT_VERBOSITY;
 #ifdef CCL_ENABLE_SYCL
         sycl_dev_type = DEFAULT_SYCL_DEV_TYPE;
         sycl_root_dev = DEFAULT_SYCL_ROOT_DEV;

@@ -236,9 +236,11 @@ std::string to_string(atl_attr_t& attr);
 std::ostream& operator<<(std::ostream& str, const atl_req_t& req);
 
 namespace ccl {
-enum class kvs_mode : int { pmi, mpi };
+enum class kvs_mode : int { pmi, mpi, pmix_ofi, pmix_ofi_shm };
 static std::map<kvs_mode, std::string> kvs_mode_names = {
     std::make_pair(kvs_mode::pmi, "pmi"),
     std::make_pair(kvs_mode::mpi, "mpi"),
+    std::make_pair(kvs_mode::pmix_ofi, "pmix_ofi"),
+    std::make_pair(kvs_mode::pmix_ofi_shm, "pmix_ofi_shm")
 };
 } // namespace ccl

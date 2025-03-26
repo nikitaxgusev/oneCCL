@@ -129,7 +129,7 @@ MPILIBNAME="mpi"
 MPICXXLIBNAME="mpicxx"
 
 # MPIVERSION is the version of the Intel(R) MPI Library that mpiicpc is intended for
-MPIVERSION="2021.14"
+MPIVERSION="2021.15"
 
 # Internal variables
 # Show is set to echo to cause the compilation command to be echoed instead
@@ -141,6 +141,7 @@ handle_executable=
 executable=a.out
 ilp64=no
 no_rpath=no
+cuda_sycl_opts=
 # End of initialization of variables
 #
 #---------------------------------------------------------------------
@@ -193,11 +194,6 @@ fi
 #
 # ------------------------------------------------------------------------
 # Argument processing.
-# This is somewhat awkward because of the handling of arguments within
-# the shell.  We want to handle arguments that include spaces without
-# loosing the spacing (an alternative would be to use a more powerful
-# scripting language that would allow us to retain the array of values,
-# which the basic (rather than enhanced) Bourne shell does not.
 #
 # Look through the arguments for arguments that indicate compile only.
 # If these are *not* found, add the library options
@@ -292,6 +288,10 @@ for arg in "$@" ; do
         profConf=$(echo A$arg | sed -e 's/A-profile=//g')
         addarg=no
         # Loading the profConf file is handled below
+        ;;
+    -enable-cuda-device-initiated)
+        cuda_sycl_opts="--ptxas-path=$I_MPI_ROOT/opt/mpi/bin/mpiptx"
+        addarg=no
         ;;
     -help)
         # Print mini-help if started without parameters
@@ -539,7 +539,7 @@ else
     rpath_opt="-Xlinker --enable-new-dtags -Xlinker -rpath -Xlinker \"${libdir}${MPILIBDIR}\" -Xlinker -rpath -Xlinker \"${libdir}\""
 fi
 if [ "$linking" = yes ] ; then
-    cmd_line="$CXX $CXXFLAGS $allargs -I\"${includedir}\" -L\"${libdir}${MPILIBDIR}\" -L\"${libdir}\" $rpath_opt $cxxlibs $mpilibs $I_MPI_OTHERLIBS $LDFLAGS $MPI_OTHERLIBS"
+    cmd_line="$CXX $CXXFLAGS $cuda_sycl_opts $allargs -I\"${includedir}\" -L\"${libdir}${MPILIBDIR}\" -L\"${libdir}\" $rpath_opt $cxxlibs $mpilibs $I_MPI_OTHERLIBS $LDFLAGS $MPI_OTHERLIBS"
     if [ "$Show" = echo ] ; then
         echo $cmd_line
     else
@@ -552,7 +552,7 @@ if [ "$linking" = yes ] ; then
         $Show objcopy --add-gnu-debuglink=${executable}.dbg ${executable}
     fi
 else
-    cmd_line="$CXX $CXXFLAGS $allargs -I\"${includedir}\""
+    cmd_line="$CXX $CXXFLAGS $cuda_sycl_opts $allargs -I\"${includedir}\""
     if [ "$Show" = echo ] ; then
         $Show $cmd_line
     else

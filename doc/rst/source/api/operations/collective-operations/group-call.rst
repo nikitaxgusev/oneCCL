@@ -1,4 +1,4 @@
-Group Calls
+Group calls 
 ***********
 
 .. doxygengroup:: group_calls

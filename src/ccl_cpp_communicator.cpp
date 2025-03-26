@@ -90,8 +90,8 @@ CCL_API context communicator::get_context() const {
     return context::create_context(get_impl()->get_context()->get_native());
 }
 
-CCL_API communicator communicator::split(const comm_split_attr& attr) {
-    return communicator(get_impl()->split(attr));
+CCL_API communicator communicator::split(int color, int key, bool split_external_use) {
+    return communicator(get_impl()->split(color, key, split_external_use));
 }
 
 } // namespace v1
