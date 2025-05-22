@@ -67,7 +67,7 @@ std::string get_ofi_lib_path() {
     return ofi_lib_path;
 }
 
-std::string get_relative_ofi_lib_path() {
+static std::string get_relative_ccl_root_path() {
     Dl_info info;
 
     if (dladdr((void*)ccl::get_library_version, &info)) {
@@ -84,16 +84,15 @@ std::string get_relative_ofi_lib_path() {
             char* ccl_root_cstr = dirname(libccl_dir);
 
             auto ccl_root = std::string(ccl_root_cstr);
-            setenv("FI_PROVIDER_PATH", (ccl_root + "/lib/libfabric/prov").c_str(), 0);
-            return ccl_root + "/lib/libfabric/libfabric.so";
+
+            return ccl_root;
         }
     }
 
-    LOG_DEBUG("Could not fetch relative path to libfabric. Fallback to `libfabric.so`");
-    return "libfabric.so";
+    return {};
 }
 
-bool ofi_api_init() {
+static bool load_libfabric() {
     ofi_lib_info.ops = &ofi_lib_ops;
     ofi_lib_info.fn_names = ofi_fn_names;
     ofi_lib_info.path = get_ofi_lib_path();
@@ -106,7 +105,20 @@ bool ofi_api_init() {
     print_error(error, ofi_lib_info);
     LOG_INFO("Retrying to load libfabric.so using relative path");
 
-    ofi_lib_info.path = get_relative_ofi_lib_path();
+    auto realtive_root = get_relative_ccl_root_path();
+    if (realtive_root.empty()) {
+        return false;
+    }
+
+    // Path up to IMPI 2021.14
+    ofi_lib_info.path = realtive_root + "/lib/libfabric/libfabric.so";
+    error = load_library(ofi_lib_info);
+    if (error == CCL_LOAD_LB_SUCCESS) {
+        return true;
+    }
+
+    // Path in IMPI 2021.15
+    ofi_lib_info.path = realtive_root + "/lib/libfabric.so";
     error = load_library(ofi_lib_info);
     if (error == CCL_LOAD_LB_SUCCESS) {
         return true;
@@ -114,6 +126,46 @@ bool ofi_api_init() {
 
     print_error(error, ofi_lib_info);
     return false;
+}
+
+static void setup_providers() {
+    const char* fi_provider_path = getenv("FI_PROVIDER_PATH");
+    if (fi_provider_path != nullptr) {
+        LOG_DEBUG("FI_PROVIDER_PATH is already set to: ", fi_provider_path);
+        return;
+    }
+
+    char libfabric_path[PATH_MAX];
+    dlinfo(ofi_lib_info.handle, RTLD_DI_ORIGIN, &libfabric_path);
+
+    // Add realpath to resolve any symlinks and get the absolute path
+    char real_libfabric_path[PATH_MAX];
+    if (!realpath(libfabric_path, real_libfabric_path)) {
+        LOG_ERROR("Failed to resolve libfabric realpath: ", strerror(errno));
+        return;
+    }
+
+    std::string primary_path = std::string(real_libfabric_path);
+    std::string secondary_path = primary_path + "/prov";
+
+    // Construct the full provider path with colon separator
+    std::string full_provider_path = primary_path + ":" + secondary_path;
+
+    if (setenv("FI_PROVIDER_PATH", full_provider_path.c_str(), 1) != 0) {
+        LOG_ERROR("Failed to set FI_PROVIDER_PATH with error: ", strerror(errno));
+        return;
+    }
+
+    LOG_DEBUG("FI_PROVIDER_PATH set to: ", full_provider_path);
+}
+
+bool ofi_api_init() {
+    if (load_libfabric() == false) {
+        return false;
+    }
+
+    setup_providers();
+    return true;
 }
 
 void ofi_api_fini() {
