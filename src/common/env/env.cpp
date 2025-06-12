@@ -179,6 +179,8 @@ env_data::env_data()
           sycl_allreduce_medium_threshold(16777216),
           sycl_allreduce_scaleout_threshold(4294967296),
           sycl_allreduce_scaleout_algo("auto"),
+          sycl_enable_arc_allreduce(0),
+          sycl_allreduce_ll_threshold(4096),
 
           sycl_reduce_scatter_tmp_buf(0),
           sycl_reduce_scatter_small_threshold(2097152),
@@ -190,6 +192,8 @@ env_data::env_data()
           sycl_allgatherv_small_threshold(131072),
           sycl_allgatherv_medium_threshold(2097152),
           sycl_allgatherv_scaleout_threshold(1048576),
+          sycl_allgatherv_ll_threshold(2048),
+
           enable_sycl_kernels(1),
 
           sycl_ccl_barrier(0),
@@ -210,6 +214,7 @@ env_data::env_data()
           sycl_enable_pipeline_gpu_rdma(0),
           sycl_enable_direct_gpu_rdma(0),
           sycl_sub_communicator(1),
+          sycl_force_pcie(0),
 #endif // CCL_ENABLE_SYCL
 
           allreduce_nreduce_buffering(0),
@@ -528,6 +533,8 @@ void env_data::parse() {
     p.env_2_type(CCL_SYCL_ALLREDUCE_MEDIUM_THRESHOLD, sycl_allreduce_medium_threshold);
     p.env_2_type(CCL_SYCL_ALLREDUCE_SCALEOUT_THRESHOLD, sycl_allreduce_scaleout_threshold);
     p.env_2_type(CCL_SYCL_ALLREDUCE_SCALEOUT, sycl_allreduce_scaleout_algo);
+    p.env_2_type(CCL_SYCL_ALLREDUCE_ARC, sycl_enable_arc_allreduce);
+    p.env_2_type(CCL_SYCL_ALLREDUCE_LL_THRESHOLD, sycl_allreduce_ll_threshold);
 
     p.env_2_type(CCL_SYCL_REDUCE_SCATTER_TMP_BUF, sycl_reduce_scatter_tmp_buf);
     p.env_2_type(CCL_SYCL_REDUCE_SCATTER_SMALL_THRESHOLD, sycl_reduce_scatter_small_threshold);
@@ -539,6 +546,7 @@ void env_data::parse() {
     p.env_2_type(CCL_SYCL_ALLGATHERV_SMALL_THRESHOLD, sycl_allgatherv_small_threshold);
     p.env_2_type(CCL_SYCL_ALLGATHERV_MEDIUM_THRESHOLD, sycl_allgatherv_medium_threshold);
     p.env_2_type(CCL_SYCL_ALLGATHERV_SCALEOUT_THRESHOLD, sycl_allgatherv_scaleout_threshold);
+    p.env_2_type(CCL_SYCL_ALLGATHERV_LL_THRESHOLD, sycl_allgatherv_ll_threshold);
 
     p.env_2_type(CCL_ENABLE_SYCL_KERNELS, enable_sycl_kernels);
 
@@ -560,6 +568,7 @@ void env_data::parse() {
     p.env_2_type(CCL_SYCL_ENABLE_PIPELINE_GPU_RDMA, sycl_enable_pipeline_gpu_rdma);
     p.env_2_type(CCL_SYCL_ENABLE_DIRECT_GPU_RDMA, sycl_enable_direct_gpu_rdma);
     p.env_2_type(CCL_SYCL_SUB_COMMUICATOR, sycl_sub_communicator);
+    p.env_2_type(CCL_SYCL_FORCE_PCIE, sycl_force_pcie);
 #endif // CCL_ENABLE_SYCL
 
     p.env_2_type(CCL_ALLREDUCE_NREDUCE_BUFFERING, allreduce_nreduce_buffering);
@@ -969,6 +978,8 @@ void env_data::print(int rank, bool is_mt_enabled) {
     LOG_INFO(CCL_SYCL_ALLREDUCE_MEDIUM_THRESHOLD, ": ", sycl_allreduce_medium_threshold);
     LOG_INFO(CCL_SYCL_ALLREDUCE_SCALEOUT_THRESHOLD, ": ", sycl_allreduce_scaleout_threshold);
     LOG_INFO(CCL_SYCL_ALLREDUCE_SCALEOUT, ": ", (!sycl_allreduce_scaleout_algo.empty()) ? sycl_allreduce_scaleout_algo : CCL_ENV_STR_NOT_SPECIFIED);
+    LOG_INFO(CCL_SYCL_ALLREDUCE_ARC, ": ", sycl_enable_arc_allreduce);
+    LOG_INFO(CCL_SYCL_ALLREDUCE_LL_THRESHOLD, ": ", sycl_allreduce_ll_threshold);
 
     LOG_INFO(CCL_SYCL_REDUCE_SCATTER_TMP_BUF, ": ", sycl_reduce_scatter_tmp_buf);
     LOG_INFO(CCL_SYCL_REDUCE_SCATTER_SMALL_THRESHOLD, ": ", sycl_reduce_scatter_small_threshold);
@@ -980,6 +991,7 @@ void env_data::print(int rank, bool is_mt_enabled) {
     LOG_INFO(CCL_SYCL_ALLGATHERV_SMALL_THRESHOLD, ": ", sycl_allgatherv_small_threshold);
     LOG_INFO(CCL_SYCL_ALLGATHERV_MEDIUM_THRESHOLD, ": ", sycl_allgatherv_medium_threshold);
     LOG_INFO(CCL_SYCL_ALLGATHERV_SCALEOUT_THRESHOLD, ": ", sycl_allgatherv_scaleout_threshold);
+    LOG_INFO(CCL_SYCL_ALLGATHERV_LL_THRESHOLD, ": ", sycl_allgatherv_ll_threshold);
 
     LOG_INFO(CCL_ENABLE_SYCL_KERNELS, ": ", enable_sycl_kernels);
 
@@ -1001,6 +1013,7 @@ void env_data::print(int rank, bool is_mt_enabled) {
     LOG_INFO(CCL_SYCL_ENABLE_PIPELINE_GPU_RDMA, ": ", sycl_enable_pipeline_gpu_rdma);
     LOG_INFO(CCL_SYCL_ENABLE_DIRECT_GPU_RDMA, ": ", sycl_enable_direct_gpu_rdma);
     LOG_INFO(CCL_SYCL_SUB_COMMUICATOR, ": ", sycl_sub_communicator);
+    LOG_INFO(CCL_SYCL_FORCE_PCIE, ": ", sycl_force_pcie);
 #endif // CCL_ENABLE_SYCL
 
     LOG_INFO(CCL_ALLREDUCE_NREDUCE_BUFFERING, ": ", allreduce_nreduce_buffering);

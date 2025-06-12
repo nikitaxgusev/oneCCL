@@ -20,6 +20,7 @@
 #include "coll/algorithms/allgatherv/sycl/allgatherv_sycl.hpp"
 #include "coll/algorithms/reduce_scatter/sycl/reduce_scatter_sycl.hpp"
 #include "coll/algorithms/broadcast/sycl/broadcast_sycl.hpp"
+#include "allreduce_ring_ll256.hpp"
 #endif // defined(CCL_ENABLE_ZE) || defined(CCL_ENABLE_SYCL)
 
 namespace ccl {
@@ -70,6 +71,44 @@ ccl::event allreduce_sycl_single_node(sycl::queue& q,
               is_single_tile,
               ", has_all_vertices_connected: ",
               has_all_vertices_connected);
+
+    // for ARC GPUs to do ring LL256
+    if (is_arc_card(ccl::ze::get_device_family(global_stream->get_ze_device()))) {
+        if (!is_aligned(send_buf, recv_buf, 0, 4)) {
+            done = false;
+            return e;
+        }
+        if (!ccl::global_data::env().sycl_enable_arc_allreduce) {
+            LOG_DEBUG("invoking allreduce LL256 kernel allreduce_ll_ring, count:",
+                      count,
+                      " datatype: ",
+                      dtype);
+            e = allreduce_ll_ring(
+                send_buf, recv_buf, count, dtype, reduction, global_comm, global_stream, done);
+            if (done) {
+                LOG_DEBUG("invoking allreduce LL256 kernel, count:",
+                          count,
+                          " datatype: ",
+                          dtype,
+                          " done");
+                return e;
+            }
+        }
+        done = true;
+        // ARC 770 does not support fp64
+        if (ccl::ze::get_device_family(global_stream->get_ze_device()) ==
+                ccl::device_family::family6 &&
+            dtype == ccl::datatype::float64) {
+            LOG_DEBUG("arc_allreduce does not support fp64");
+            done = false;
+            return e;
+        }
+        LOG_DEBUG(
+            "invoking allreduce LL256 kernel arc_allreduce, count:", count, " datatype: ", dtype);
+        e = arc_allreduce(send_buf, recv_buf, count, dtype, reduction, global_comm, global_stream);
+        LOG_DEBUG("invoking allreduce LL256 kernel, count:", count, " datatype: ", dtype, " done");
+        return e;
+    }
 
     if (!ccl::global_data::env().sycl_esimd) {
         if (count * ccl_dtype.size() <= ccl::global_data::env().sycl_allreduce_small_threshold) {

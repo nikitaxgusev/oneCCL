@@ -84,6 +84,18 @@ ccl::event allgatherv_large(const void* send_buf,
                             const ccl::vector_class<ccl::event>& deps,
                             bool wait_on_deps = false);
 
+// ring with LL protocols
+ccl::event allgatherv_ll_ring(const void* send_buf,
+                              size_t send_count,
+                              void* recv_buf,
+                              const ccl::vector_class<size_t>& recv_counts,
+                              const ccl::vector_class<size_t>& offsets,
+                              ccl::datatype dtype,
+                              ccl_comm* comm,
+                              ccl_stream* global_stream,
+                              const ccl::vector_class<ccl::event>& deps,
+                              bool& done);
+
 ccl::event allgatherv_scaleout_sycl(sycl::queue& q,
                                     const void* send_buf,
                                     size_t send_count,

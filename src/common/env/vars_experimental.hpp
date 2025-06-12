@@ -279,6 +279,9 @@ constexpr const char* CCL_SYCL_ALLREDUCE_SCALEOUT_THRESHOLD = "CCL_SYCL_ALLREDUC
  */
 constexpr const char* CCL_SYCL_ALLREDUCE_SCALEOUT = "CCL_SYCL_ALLREDUCE_SCALEOUT";
 
+constexpr const char* CCL_SYCL_ALLREDUCE_ARC = "CCL_SYCL_ALLREDUCE_ARC";
+constexpr const char* CCL_SYCL_ALLREDUCE_LL_THRESHOLD = "CCL_SYCL_ALLREDUCE_LL_THRESHOLD";
+
 /**
  * @brief Enable the use of persistent temporary buffer in reduce_scatter
  *
@@ -332,6 +335,9 @@ constexpr const char* CCL_SYCL_REDUCE_SCATTER_SCALEOUT_THRESHOLD = "CCL_SYCL_RED
  *
  */
 constexpr const char* CCL_SYCL_REDUCE_SCATTER_SCALEOUT = "CCL_SYCL_REDUCE_SCATTER_SCALEOUT";
+
+constexpr const char* CCL_SYCL_ALLGATHERV_LL_THRESHOLD = "CCL_SYCL_ALLGATHERV_LL_THRESHOLD";
+
 /** @} */
 /** @} */
 
@@ -382,6 +388,8 @@ constexpr const char* CCL_SYCL_ENABLE_DIRECT_GPU_RDMA = "CCL_SYCL_ENABLE_DIRECT_
  * By-default: "1 (enabled)"
  */
 constexpr const char* CCL_SYCL_SUB_COMMUICATOR = "CCL_SYCL_SUB_COMMUICATOR";
+
+constexpr const char* CCL_SYCL_FORCE_PCIE = "CCL_SYCL_FORCE_PCIE";
 
 #if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE) && defined(CCL_ENABLE_UMF)
 constexpr const char* CCL_UMF_ENABLE = "CCL_UMF_ENABLE";

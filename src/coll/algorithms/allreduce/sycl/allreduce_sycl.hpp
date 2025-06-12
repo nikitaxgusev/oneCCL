@@ -74,6 +74,16 @@ ccl::event allreduce_large(const void* send_buf,
                            ccl_stream* global_stream,
                            const ccl::vector_class<ccl::event>& deps);
 
+// ring with LL protocols
+ccl::event allreduce_ll_ring(const void* src,
+                             void* dst,
+                             size_t count,
+                             ccl::datatype dtype,
+                             ccl::reduction reduction,
+                             ccl_comm* comm,
+                             ccl_stream* global_stream,
+                             bool& done);
+
 ccl::event allreduce_scaleout_sycl(sycl::queue& q,
                                    const void* send_buf,
                                    void* recv_buf,

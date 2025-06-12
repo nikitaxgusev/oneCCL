@@ -463,11 +463,15 @@ bool topo_manager::build_fabric_connectivity_matrix(
             // set matrix element based on whether there are edges between vertices
             matrix[vertex_a_idx][vertex_b_idx] = (edge_count > 0);
             if (!matrix[vertex_a_idx][vertex_b_idx]) {
+                static int warned = 0;
                 is_matrix_connected = false;
-                LOG_WARN(
-                    "topology recognition shows PCIe connection between devices."
-                    " If this is not correct, you can disable topology recognition,"
-                    " with CCL_TOPO_FABRIC_VERTEX_CONNECTION_CHECK=0. This will assume XeLinks across devices");
+                if (!warned) {
+                    LOG_WARN_ROOT(
+                        "topology recognition shows PCIe connection between devices."
+                        " If this is not correct, you can disable topology recognition,"
+                        " with CCL_TOPO_FABRIC_VERTEX_CONNECTION_CHECK=0. This will assume XeLinks across devices");
+                    warned = 1;
+                }
             }
         }
     }

@@ -63,6 +63,7 @@ if (CCL_ENABLE_SYCL AND CCL_ENABLE_ZE)
         coll/algorithms/allgatherv/sycl/allgatherv_medium_sycl.cpp
         coll/algorithms/allgatherv/sycl/allgatherv_large_sycl.cpp
         coll/algorithms/allgatherv/sycl/allgatherv_scaleout_sycl.cpp
+        coll/algorithms/allgatherv/sycl/allgatherv_pcie.cpp
 
         coll/algorithms/alltoall/sycl/alltoall_sycl.cpp
         coll/algorithms/alltoall/sycl/alltoall_large_sycl.cpp
@@ -80,6 +81,8 @@ if (CCL_ENABLE_SYCL AND CCL_ENABLE_ZE)
         coll/algorithms/allreduce/sycl/allreduce_large_sycl_int32.cpp
         coll/algorithms/allreduce/sycl/allreduce_sycl.cpp
         coll/algorithms/allreduce/sycl/allreduce_scaleout_sycl.cpp
+        coll/algorithms/allreduce/sycl/allreduce_ring_ll256.cpp
+        coll/algorithms/allreduce/sycl/allreduce_pcie.cpp
 
         coll/algorithms/reduce_scatter/sycl/reduce_scatter_sycl.cpp
         coll/algorithms/reduce_scatter/sycl/reduce_scatter_small_sycl.cpp
@@ -97,6 +100,7 @@ if (CCL_ENABLE_SYCL AND CCL_ENABLE_ZE)
         coll/algorithms/utils/sycl_coll_base.cpp
         coll/algorithms/utils/sycl_pipe_send.cpp
         coll/algorithms/utils/sycl_selection.cpp
+        coll/algorithms/utils/sycl_ll256.cpp
     )
     if (ENABLE_UMF)
         list(APPEND EXTENSIONS_SRC

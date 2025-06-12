@@ -414,7 +414,8 @@ std::array<T *, N> get_ipc_ptrs(std::shared_ptr<ccl_comm> comm,
                                 void *local_ptr,
                                 ccl_sched *sched,
                                 sycl::queue q,
-                                bool dummy_copy = false) {
+                                bool dummy_copy = false,
+                                bool to_cache = true) {
     std::array<T *, N> remote_ptrs;
 
     const int rank = comm->rank();
@@ -424,7 +425,8 @@ std::array<T *, N> get_ipc_ptrs(std::shared_ptr<ccl_comm> comm,
     for (int i = 1; i < size; i++) {
         int peer_rank = (rank + i) % size;
         ccl_buffer tmp_ccl_buf;
-        sched->get_memory().handle_manager.get(peer_rank, handle_index, tmp_ccl_buf, comm.get());
+        sched->get_memory().handle_manager.get(
+            peer_rank, handle_index, tmp_ccl_buf, comm.get(), false, to_cache);
         CCL_THROW_IF_NOT(tmp_ccl_buf.get_ptr(), "null IPC buffer is received");
         remote_ptrs[peer_rank] = (T *)tmp_ccl_buf.get_ptr();
         if (dummy_copy) {
@@ -439,10 +441,12 @@ std::array<T *, N> get_ipc_ptrs(std::shared_ptr<ccl_comm> comm,
                                 const int handle_index,
                                 void *local_ptr,
                                 ccl_sched *sched,
-                                bool dummy_copy = false) {
+                                bool dummy_copy = false,
+                                bool to_cache = true) {
     auto q = get_default_queue();
 
-    return get_ipc_ptrs<T, N>(std::move(comm), handle_index, local_ptr, sched, q, dummy_copy);
+    return get_ipc_ptrs<T, N>(
+        std::move(comm), handle_index, local_ptr, sched, q, dummy_copy, to_cache);
 }
 
 template <int NE, int NP, typename L>
@@ -633,6 +637,56 @@ auto invoke_esimd_function(L lambda, int world) {
         case 16: lambda.template operator()<16, align>(); break;
         default: break;
     }
+}
+
+// PCIe LL256 algorithms
+template <int NRanks, template <typename, int> class Proto, typename L>
+sycl::event invoke_pcie_type(L lambda, ccl::datatype dtype) {
+    sycl::event e;
+    switch (dtype) {
+        case ccl::datatype::int16: e = lambda.template operator()<short, NRanks, Proto>(); break;
+        case ccl::datatype::float16:
+#ifdef CCL_SYCL_VEC_SUPPORT_FP16
+            e = lambda.template operator()<sycl::half, NRanks, Proto>();
+#else
+            CCL_THROW(
+                "The Sycl compilers do not support Sycl::vec kernels with float16, please switch to ESIMD kernels, or build oneCCL with the latest version of cmake and oneAPI compiler");
+#endif
+            break;
+        case ccl::datatype::bfloat16:
+#ifdef CCL_SYCL_VEC_SUPPORT_BF16
+            e = lambda.template operator()<sycl::ext::oneapi::bfloat16, NRanks, Proto>();
+#else
+            CCL_THROW(
+                "The Sycl compilers do not support Sycl::vec kernels with bfloat16, please switch to ESIMD kernels, or build oneCCL with oneAPI compiler that is newer than 2024.2.0");
+#endif
+            break;
+        case ccl::datatype::float32: e = lambda.template operator()<float, NRanks, Proto>(); break;
+        case ccl::datatype::int32: e = lambda.template operator()<int, NRanks, Proto>(); break;
+        case ccl::datatype::uint32:
+            e = lambda.template operator()<uint32_t, NRanks, Proto>();
+            break;
+        case ccl::datatype::int64: e = lambda.template operator()<int64_t, NRanks, Proto>(); break;
+        case ccl::datatype::uint64:
+            e = lambda.template operator()<uint64_t, NRanks, Proto>();
+            break;
+        case ccl::datatype::float64: e = lambda.template operator()<double, NRanks, Proto>(); break;
+        default: CCL_THROW("unsupported datatype ", dtype); break;
+    }
+    return e;
+}
+
+template <template <typename, int> class Proto, typename L>
+sycl::event invoke_pcie(L lambda, ccl_comm *comm, ccl::datatype dtype) {
+    sycl::event e;
+    switch (comm->size()) {
+        case 1: e = invoke_pcie_type<1, Proto>(lambda, dtype); break;
+        case 2: e = invoke_pcie_type<2, Proto>(lambda, dtype); break;
+        case 4: e = invoke_pcie_type<4, Proto>(lambda, dtype); break;
+        case 8: e = invoke_pcie_type<8, Proto>(lambda, dtype); break;
+        default: CCL_THROW("unsupported comm size ", comm->size()); break;
+    }
+    return e;
 }
 
 // helper function to check NAN or INF numbers in the input buffer

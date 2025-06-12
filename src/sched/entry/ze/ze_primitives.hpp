@@ -29,7 +29,16 @@ namespace ze {
 
 #define ZE_CALL(ze_name, ze_args) ccl::ze::ze_call().do_call(ze_name ze_args, #ze_name)
 
-enum class device_id : uint32_t { unknown = 0x0, id1 = 0x200, id2 = 0xbd0, id3 = 0xb60 };
+enum class device_id : uint32_t {
+    unknown = 0x0,
+    id1 = 0x200,
+    id2 = 0xbd0,
+    id3 = 0xb60,
+    id4 = 0x56a0, /* ARC A-series */
+    id5 = 0xe200, /* ARC B-series */
+    id6 = 0xe210, /* ARC B-series DT6 */
+    id7 = 0xe220, /* ARC B-series DT1, DT2, DT3 */
+};
 
 enum class copy_engine_mode { none, main, link, auto_mode };
 enum class h2d_copy_engine_mode { none, main, auto_mode };
@@ -261,6 +270,9 @@ std::string flags_to_string(uint32_t flags) {
 
     return ccl::utils::join_strings(output, " | ");
 }
+
+bool is_arc_card(device_family family);
+bool should_disable_rdma(const ze_device_handle_t& device);
 
 } // namespace ze
 } // namespace ccl

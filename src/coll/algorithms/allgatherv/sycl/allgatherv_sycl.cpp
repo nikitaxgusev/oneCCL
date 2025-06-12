@@ -69,6 +69,20 @@ ccl::event allgather_sycl_single_node(sycl::queue& q,
         return ccl::event::create_from_native(sycl_e);
     }
 
+    // PCIe ring LL256
+    if (is_arc_card(ccl::ze::get_device_family(global_stream->get_ze_device()))) {
+        if (!is_aligned(send_buf, recv_buf, send_count * ccl_dtype.size(), 4) ||
+            ccl::global_data::env().sycl_enable_arc_allreduce) {
+            done = false;
+            return e;
+        }
+        LOG_DEBUG("invoking allgatherv LL256 kernel, send_count:", send_count, " datatype: ", dtype);
+        e = allgatherv_ll_ring(
+            send_buf, send_count, recv_buf, recv_counts, offsets, dtype, comm, global_stream, deps, done);
+        LOG_DEBUG("invoking allgatherv LL256 kernel, count:", send_count, " datatype: ", dtype, " done");
+        return e;
+    }
+
     if (!ccl::global_data::env().sycl_esimd) {
         if (send_count * ccl_dtype.size() <= ccl::global_data::env().sycl_allgatherv_small_threshold) {
 #ifdef CCL_ENABLE_ITT

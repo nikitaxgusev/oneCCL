@@ -141,16 +141,16 @@ CCL_ENABLE_AUTO_CACHE=&quot;&lt;value&gt;&quot;<br />
 Arguments<br />
 &quot;&lt;value&gt;&quot; Description<br />
 
- - 0 Does not allow enabling cache model automatically.<br />
+ - 0 Does not allow enabling cache model automatically. (default)<br />
 
 
- - 1 Allows enabling cache model automatically (default).<br />
+ - 1 Allows enabling cache model automatically.<br />
 <br />
 
 
 
 
-By-default: &quot;1&quot; 
+By-default: &quot;0&quot; 
         
 
 ## CCL_ALLGATHER

@@ -127,6 +127,11 @@ ccl::event allreduce_scaleout_sycl(sycl::queue& q,
                                    bool is_cpu_buffers) {
     auto ccl_dtype = ccl::global_data::get().dtypes->get(dtype);
     bool copy_to_host = ccl::global_data::env().sycl_enable_direct_gpu_rdma ? false : true;
+    ze_device_handle_t ze_dev =
+        sycl::get_native<sycl::backend::ext_oneapi_level_zero>(q.get_device());
+    if (should_disable_rdma(ze_dev)) {
+        copy_to_host = true;
+    }
     allreduce_scaleout_algo algo = tune_attr.algo;
 
     sycl::event ev;

@@ -230,6 +230,8 @@ public:
     size_t sycl_allreduce_medium_threshold;
     size_t sycl_allreduce_scaleout_threshold;
     std::string sycl_allreduce_scaleout_algo;
+    bool sycl_enable_arc_allreduce;
+    size_t sycl_allreduce_ll_threshold;
 
     bool sycl_reduce_scatter_tmp_buf;
     size_t sycl_reduce_scatter_small_threshold;
@@ -241,6 +243,7 @@ public:
     size_t sycl_allgatherv_small_threshold;
     size_t sycl_allgatherv_medium_threshold;
     size_t sycl_allgatherv_scaleout_threshold;
+    size_t sycl_allgatherv_ll_threshold;
 
     bool enable_sycl_kernels;
 
@@ -261,6 +264,7 @@ public:
     bool sycl_enable_pipeline_gpu_rdma;
     bool sycl_enable_direct_gpu_rdma;
     bool sycl_sub_communicator;
+    bool sycl_force_pcie;
     ccl::utils::alloc_mode sycl_scaleout_buf_alloc_mode;
 #endif // CCL_ENABLE_SYCL
 

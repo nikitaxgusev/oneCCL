@@ -74,14 +74,12 @@ bool can_use_sycl_kernels(const ccl_selector_param& param) {
 
     RETURN_FALSE_IF(ccl::global_data::env().worker_count != 1, "unsupported count of workers");
 #ifdef CCL_ENABLE_SYCL
-    // it hangs if we try to use sycl kernels without ze cache
-    RETURN_FALSE_IF(ccl::global_data::env().enable_ze_cache == 0, "ze cache is not enabled");
     RETURN_FALSE_IF(param.comm->get_pair_comm()->size() > 2,
                     "unsupported pair_comm size: ",
                     param.comm->get_pair_comm()->size());
-    RETURN_FALSE_IF(!param.comm->get_topo_manager().has_p2p_access(),
-                    "no p2p access between devices");
-    RETURN_FALSE_IF(!param.comm->get_topo_manager().has_all_vertices_connected(),
+    // ARC GPUs are exception
+    RETURN_FALSE_IF(!param.comm->get_topo_manager().has_all_vertices_connected() &&
+                        !is_arc_card(ccl::ze::get_device_family(param.stream->get_ze_device())),
                     "no connection between vertices");
     RETURN_FALSE_IF(!param.comm->get_topo_manager().has_same_ppn(),
                     "ppn is not the same among the nodes");
@@ -101,6 +99,11 @@ bool can_use_sycl_kernels(const ccl_selector_param& param) {
     RETURN_FALSE_IF(!param.stream->get_native_stream().is_in_order(), "Stream is not in order");
     RETURN_FALSE_IF(!is_dtype_supported, "Data type is not supported");
     RETURN_FALSE_IF(is_oversubscription, "Oversubscription is not allowed");
+
+    if (param.ctype != ccl_coll_allreduce && param.ctype != ccl_coll_allgatherv) {
+        RETURN_FALSE_IF(!param.comm->get_topo_manager().has_p2p_access(),
+                        "no p2p access between devices");
+    }
 
     // Conditions specific to allreduce
     if (param.ctype == ccl_coll_allreduce) {
