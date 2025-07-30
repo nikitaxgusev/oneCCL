@@ -26,20 +26,8 @@ ccl::event broadcast_sycl_single_node(sycl::queue& q,
                                       int root,
                                       ccl_comm* comm,
                                       ccl_stream* global_stream,
-                                      const vector_class<ccl::event>& deps,
+                                      const vector_class<event>& deps,
                                       bool& done);
-
-ccl::event broadcast_sycl(sycl::queue& q,
-                          const void* send_buf,
-                          void* recv_buf,
-                          size_t count,
-                          ccl::datatype dtype,
-                          int root,
-                          ccl_comm* global_comm,
-                          ccl_stream* global_stream,
-                          const broadcast_attr& attr,
-                          const vector_class<ccl::event>& deps,
-                          bool& done);
 
 } // namespace v1
 } // namespace ccl
@@ -52,24 +40,3 @@ ccl::event broadcast_small(const void* send_buf,
                            ccl_comm* comm,
                            ccl_stream* global_stream,
                            const ccl::vector_class<ccl::event>& deps);
-
-ccl::event broadcast_large(const void* send_buf,
-                           void* recv_buf,
-                           size_t count,
-                           ccl::datatype dtype,
-                           int root,
-                           ccl_comm* comm,
-                           ccl_stream* global_stream,
-                           const ccl::vector_class<ccl::event>& deps);
-
-ccl::event broadcast_scaleout_sycl(sycl::queue& q,
-                                   const void* send_buf,
-                                   void* recv_buf,
-                                   size_t count,
-                                   ccl::datatype dtype,
-                                   int root,
-                                   ccl_comm* comm,
-                                   const ccl::vector_class<ccl::event>& deps,
-                                   bool original_deps,
-                                   bool& done,
-                                   bool is_cpu_buffers = false);

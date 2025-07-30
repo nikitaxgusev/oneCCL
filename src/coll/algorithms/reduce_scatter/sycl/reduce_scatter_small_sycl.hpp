@@ -116,8 +116,6 @@ public:
                               void *out_buffer,
                               ccl::datatype dtype,
                               size_t recv_size,
-                              ccl::reduction reduction,
-                              const ccl::vector_class<ccl::event> &deps,
                               bool &done) {
         using namespace __ESIMD_NS;
         using namespace __ESIMD_ENS;
@@ -133,21 +131,21 @@ public:
         }
 
         // check local alignment
-        int align4 = is_aligned(send_buf, out_buffer, recv_size, sizeof(data_type), 4);
+        int align4 = is_aligned(send_buf, out_buffer, recv_size * sizeof(data_type), 4);
 
         auto esimd_lambda = [&]<int kernel_inner_loop>() {
             if (align4) {
                 return reduce_scatter_esimd<kernel_inner_loop, 4>(
-                    queue, send_buf, out_buffer, dtype, recv_size, deps, done);
+                    queue, send_buf, out_buffer, dtype, recv_size, done);
             }
             else {
                 return reduce_scatter_esimd<kernel_inner_loop, 2>(
-                    queue, send_buf, out_buffer, dtype, recv_size, deps, done);
+                    queue, send_buf, out_buffer, dtype, recv_size, done);
             }
         };
 
         if (total_count * sizeof(data_type) <= 8192) {
-            e = reduce_scatter_scalar<1, 16>(queue, send_buf, out_buffer, dtype, recv_size, deps, done);
+            e = reduce_scatter_scalar<1, 16>(queue, send_buf, out_buffer, dtype, recv_size, done);
         }
         else if (total_count * sizeof(data_type) <= 524288) {
             e = esimd_lambda.template operator()<1>();
@@ -167,13 +165,6 @@ public:
                 e = esimd_lambda.template operator()<4>();
             }
         }
-
-        if (reduction == ccl::reduction::avg) {
-            std::vector<sycl::event> evs;
-            evs.push_back(e);
-            e = sycl_average(queue, out_buffer, recv_size, world, dtype, evs);
-        }
-
         return ccl::event::create_from_native(e);
     }
 
@@ -183,7 +174,6 @@ public:
                                      void *out_buffer,
                                      ccl::datatype dtype,
                                      size_t recv_size,
-                                     const ccl::vector_class<ccl::event> &deps,
                                      bool &done) {
         using namespace __ESIMD_NS;
         using namespace __ESIMD_ENS;
@@ -233,10 +223,7 @@ public:
         buffer_index++;
         buffer_index %= TRIPLE_BUFFER;
 
-        std::vector<sycl::event> dep_events = get_sycl_events(deps);
-
         e = queue.submit([&](sycl::handler &cgh) {
-            cgh.depends_on(dep_events);
             cgh.parallel_for<Reduce_scatter_small_kernel_esimd<data_type, kernel_inner_loop, align>>(
                 sycl::nd_range<1>({ total_threads_dispatched }, wg_size),
                 [=](sycl::nd_item<1> idx2) SYCL_ESIMD_KERNEL {
@@ -667,8 +654,10 @@ public:
                                       void *out_buffer,
                                       ccl::datatype dtype,
                                       size_t recv_size,
-                                      const ccl::vector_class<ccl::event> &deps,
                                       bool &done) {
+        using namespace __ESIMD_NS;
+        using namespace __ESIMD_ENS;
+
         sycl::event e;
         uint32_t temp_rank = rank;
         uint32_t temp_world = world;
@@ -721,15 +710,14 @@ public:
         buffer_index++;
         buffer_index %= TRIPLE_BUFFER;
 
-        std::vector<sycl::event> dep_events = get_sycl_events(deps);
-
         e = queue.submit([&](sycl::handler &cgh) {
-            cgh.depends_on(dep_events);
             cgh.parallel_for<Reduce_scatter_small_kernel_scalar<data_type, kernel_inner_loop_scalar, wg_size>>(
                 sycl::nd_range<1>({ total_threads_dispatched }, wg_size),
                 [=](sycl::nd_item<1> idx2) [[sycl::reqd_sub_group_size(wg_size)]] {
+                    //slm_init(1024);
                     uint32_t idx = idx2.get_global_id();
 
+                    //ESIMD kernel
                     int *local_sync_ptr;
 
                     //use the temp buffer for the current rank to copy the data to.
@@ -810,7 +798,6 @@ public:
                         }
                     }
 
-                    //sycl::atomic_fence(sycl::memory_order::acq_rel, sycl::memory_scope::device);
                     //once the local sync is done, retire useless threads
                     if (idx >= total_threads_needed)
                         return;

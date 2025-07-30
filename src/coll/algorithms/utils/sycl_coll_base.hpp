@@ -23,7 +23,6 @@
 
 #include <sycl/sycl.hpp>
 #include <sycl/ext/intel/esimd.hpp>
-#include "common/log/log.hpp"
 
 #if defined(CCL_ENABLE_ZE) || defined(CCL_ENABLE_SYCL)
 #include "comm/comm_interface.hpp"
@@ -472,11 +471,9 @@ ccl::event invoke_collective_type(L lambda, ccl::datatype dtype) {
 #endif
             break;
         case ccl::datatype::float32: e = lambda.template operator()<float, NE, NP>(); break;
-        case ccl::datatype::float64: e = lambda.template operator()<double, NE, NP>(); break;
         case ccl::datatype::int32: e = lambda.template operator()<int, NE, NP>(); break;
         case ccl::datatype::int64: e = lambda.template operator()<int64_t, NE, NP>(); break;
         case ccl::datatype::uint64: e = lambda.template operator()<uint64_t, NE, NP>(); break;
-        case ccl::datatype::uint32: e = lambda.template operator()<uint32_t, NE, NP>(); break;
         default: CCL_THROW("unsupported datatype ", dtype); break;
     }
     return e;
@@ -535,11 +532,7 @@ sycl::event invoke_scaleout(L lambda, ccl::datatype dtype) {
 #endif
             break;
         case ccl::datatype::float32: e = lambda.template operator()<float>(); break;
-        case ccl::datatype::float64: e = lambda.template operator()<double>(); break;
         case ccl::datatype::int32: e = lambda.template operator()<int>(); break;
-        case ccl::datatype::uint32: e = lambda.template operator()<uint32_t>(); break;
-        case ccl::datatype::int64: e = lambda.template operator()<int64_t>(); break;
-        case ccl::datatype::uint64: e = lambda.template operator()<uint64_t>(); break;
         default: CCL_THROW("unsupported datatype ", dtype); break;
     }
     return e;
@@ -555,24 +548,20 @@ const T *ptr_offset(const T *ptr, size_t offset) {
     return static_cast<const char *>(ptr) + offset;
 }
 
-inline bool is_aligned(const void *buf, const size_t count, const int dsize, const int alignment) {
-    return dsize >= 4 || ((size_t)buf % alignment == 0 && (count * dsize) % alignment == 0);
+inline bool is_aligned(const void *buf, const size_t size, const int alignment) {
+    return (size_t)buf % alignment == 0 && size % alignment == 0;
 }
 
 inline bool is_aligned(const void *send_buf,
                        const void *recv_buf,
-                       const size_t count,
-                       const int dsize,
+                       const size_t size,
                        const int alignment) {
-    return dsize >= 4 || ((size_t)send_buf % alignment == 0 && (size_t)recv_buf % alignment == 0 &&
-                          (count * dsize) % alignment == 0);
+    return (size_t)send_buf % alignment == 0 && (size_t)recv_buf % alignment == 0 &&
+           size % alignment == 0;
 }
 
-inline bool all_aligned(std::vector<void *> ptrs, size_t count, int dsize, size_t alignment) {
-    if (dsize >= 4 && dsize >= alignment) {
-        return true;
-    }
-    if ((count * dsize) % alignment) {
+inline bool all_aligned(std::vector<void *> ptrs, size_t size, size_t alignment) {
+    if (size % alignment) {
         return false;
     }
     for (const void *ptr : ptrs) {
@@ -583,14 +572,11 @@ inline bool all_aligned(std::vector<void *> ptrs, size_t count, int dsize, size_
     return true;
 }
 
-inline bool all_aligned(void **ptrs, int ptr_count, size_t count, int dsize, size_t alignment) {
-    if (dsize >= 4 && dsize >= alignment) {
-        return true;
-    }
-    if ((count * dsize) % alignment) {
+inline bool all_aligned(void **ptrs, int count, size_t size, size_t alignment) {
+    if (size % alignment) {
         return false;
     }
-    for (int i = 0; i < ptr_count; i++) {
+    for (int i = 0; i < count; i++) {
         if ((size_t)ptrs[i] % alignment) {
             return false;
         }
@@ -600,26 +586,10 @@ inline bool all_aligned(void **ptrs, int ptr_count, size_t count, int dsize, siz
 
 inline bool can_use_full_vector(const void *send_buf,
                                 const void *recv_buf,
-                                const size_t count,
-                                const int dsize,
+                                const size_t size,
                                 const int alignment = 4) {
-    return dsize >= 4 || is_aligned(send_buf, recv_buf, count, dsize, alignment) &&
-                             ccl::global_data::env().sycl_full_vector;
-}
-
-inline bool use_recording_path(const sycl::queue &q) {
-    return ccl::global_data::env().sycl_force_recording_path ||
-           q.ext_oneapi_get_state() == sycl::ext::oneapi::experimental::queue_state::recording;
-}
-
-inline bool use_recording_path(const ccl_stream *stream) {
-    if (stream) {
-        return use_recording_path(stream->get_native_stream());
-    }
-    if (ccl::global_data::env().sycl_force_recording_path) {
-        LOG_WARN("trying to force recording on null stream; falling back to non-recording");
-    }
-    return false;
+    return is_aligned(send_buf, recv_buf, size, alignment) &&
+           ccl::global_data::env().sycl_full_vector;
 }
 
 inline sycl::event get_last_event(const sycl::queue &q) {
@@ -674,6 +644,8 @@ template <int NRanks, template <typename, int> class Proto, typename L>
 sycl::event invoke_pcie_type(L lambda, ccl::datatype dtype) {
     sycl::event e;
     switch (dtype) {
+        case ccl::datatype::int8: e = lambda.template operator()<int8_t, NRanks, Proto>(); break;
+        case ccl::datatype::uint8: e = lambda.template operator()<uint8_t, NRanks, Proto>(); break;
         case ccl::datatype::int16: e = lambda.template operator()<short, NRanks, Proto>(); break;
         case ccl::datatype::float16:
 #ifdef CCL_SYCL_VEC_SUPPORT_FP16
@@ -712,7 +684,9 @@ sycl::event invoke_pcie(L lambda, ccl_comm *comm, ccl::datatype dtype) {
     switch (comm->size()) {
         case 1: e = invoke_pcie_type<1, Proto>(lambda, dtype); break;
         case 2: e = invoke_pcie_type<2, Proto>(lambda, dtype); break;
+        case 3: e = invoke_pcie_type<3, Proto>(lambda, dtype); break;
         case 4: e = invoke_pcie_type<4, Proto>(lambda, dtype); break;
+        case 6: e = invoke_pcie_type<6, Proto>(lambda, dtype); break;
         case 8: e = invoke_pcie_type<8, Proto>(lambda, dtype); break;
         default: CCL_THROW("unsupported comm size ", comm->size()); break;
     }

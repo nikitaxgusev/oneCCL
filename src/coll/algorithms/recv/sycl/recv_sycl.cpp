@@ -49,7 +49,9 @@ static ccl::event recv_sycl_single_node(sycl::queue& q,
               count,
               ", peer_rank=",
               node_peer_rank);
-    if (count == 0) {
+    if (count == 0 || comm->size() == 1) {
+        LOG_DEBUG("recv_sycl_single_node: count is 0 or comm size is 1, skipping recv");
+        done = true;
         auto sycl_deps = get_sycl_events(deps);
         sycl::event barrier = submit_wait_on_events(sycl_queue, sycl_deps);
 
@@ -62,6 +64,12 @@ static ccl::event recv_sycl_single_node(sycl::queue& q,
 
         done = true;
         return ccl::event::create_from_native(ack_event);
+    }
+
+    if (is_arc_card(ccl::ze::get_device_family(global_stream->get_ze_device())) &&
+        !group_impl::is_group_active) {
+        ccl::event e = recv_ll(recv_buf, count, dtype, peer_rank, comm, global_stream, deps, done);
+        return e;
     }
 
     const std::vector<ze_handle_exchange_entry::mem_desc_t> buffer = {
@@ -150,67 +158,6 @@ static ccl::event recv_sycl_single_node(sycl::queue& q,
     return ret_evt;
 }
 
-static ccl::event recv_mt_sycl_single_node(sycl::queue& q,
-                                           void* recv_buf,
-                                           size_t recv_count,
-                                           ccl::datatype dtype,
-                                           int peer_rank,
-                                           ccl_comm* comm,
-                                           ccl_stream* global_stream,
-                                           const pt2pt_attr& /*attr*/,
-                                           const std::vector<ccl::event>& deps,
-                                           bool& done) {
-    done = false;
-    auto node_comm = comm->get_node_comm();
-    auto& g_shared_res = *ccl::global_data::get().shared_data;
-
-    // get the operation ID from the shared handshake
-    int op_id = g_shared_res.get_shared_op_id(comm->global_current_id, false);
-
-    // publish our pointer in hash_table
-    g_shared_res.do_ipc_exchangeExt(comm,
-                                    g_shared_res.hash_table,
-                                    global_stream,
-                                    { recv_buf },
-                                    comm->global_current_id,
-                                    true /* is_pt2pt */
-    );
-
-    // produce a device event that signals "my dependencies are done, my buffer is ready"
-    auto sycl_deps = get_sycl_events(deps);
-    sycl::event recv_ready_event = submit_wait_on_events(q, sycl_deps);
-
-    // store that in shared_resources so the sender can wait on it
-    g_shared_res.set_receiver_ready_event(op_id, recv_ready_event);
-
-    // wait for the host handshake (a host-level signal that the copy is done)
-    {
-        auto& handshake = g_shared_res.handshakes[op_id];
-        // We mark that we have published our pointer
-        {
-            std::lock_guard<std::mutex> lk(handshake.m);
-            handshake.recv_published = true;
-            handshake.cv.notify_one();
-        }
-
-        // Wait until the sender says "copy_done" (a host-level guarantee)
-        std::unique_lock<std::mutex> lk(handshake.m);
-        while (!handshake.copy_done) {
-            handshake.cv.wait(lk);
-        }
-        handshake.copy_done = false; // reset
-    }
-
-    // combine the final copy_event from the sender with our local deps
-    sycl::event sender_copy_event = g_shared_res.copy_event;
-    sycl_deps = get_sycl_events(deps);
-    sycl_deps.push_back(sender_copy_event);
-    sycl::event ret_sycl_event = submit_wait_on_events(q, sycl_deps);
-
-    done = true;
-    return ccl::event::create_from_native(ret_sycl_event);
-}
-
 ccl::event recv_sycl(sycl::queue& q,
                      void* recv_buf,
                      size_t count,
@@ -234,15 +181,14 @@ ccl::event recv_sycl(sycl::queue& q,
         ccl::global_data::env().sycl_pt2pt_read = 1;
     }
 
+    if (is_arc_card(ccl::ze::get_device_family(global_stream->get_ze_device()))) {
+        LOG_DEBUG("recv_sycl: write mode enabled: ARC card detected");
+        ccl::global_data::env().sycl_pt2pt_read = 0;
+    }
+
     if (is_single_node) {
-        if (comm->is_multi_thread_instance() == true) {
-            return recv_mt_sycl_single_node(
-                q, recv_buf, count, dtype, peer_rank, comm, global_stream, attr, deps, done);
-        }
-        else {
-            return recv_sycl_single_node(
-                q, recv_buf, count, dtype, peer_rank, comm, global_stream, attr, deps, done);
-        }
+        return recv_sycl_single_node(
+            q, recv_buf, count, dtype, peer_rank, comm, global_stream, attr, deps, done);
     }
     else {
         done = false;

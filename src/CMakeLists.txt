@@ -93,14 +93,15 @@ if (CCL_ENABLE_SYCL AND CCL_ENABLE_ZE)
         coll/algorithms/reduce_scatter/sycl/reduce_scatter_large_sycl_fp16.cpp
         coll/algorithms/reduce_scatter/sycl/reduce_scatter_large_sycl_bf16.cpp
         coll/algorithms/reduce_scatter/sycl/reduce_scatter_scaleout_sycl.cpp
+        coll/algorithms/reduce_scatter/sycl/reduce_scatter_pcie.cpp
 
         coll/algorithms/broadcast/sycl/broadcast_sycl.cpp
         coll/algorithms/broadcast/sycl/broadcast_small_sycl.cpp
-        coll/algorithms/broadcast/sycl/broadcast_large_sycl.cpp
-        coll/algorithms/broadcast/sycl/broadcast_scaleout_sycl.cpp
 
         coll/algorithms/recv/sycl/recv_sycl.cpp
+        coll/algorithms/recv/sycl/recv_pcie.cpp
         coll/algorithms/send/sycl/send_sycl.cpp
+        coll/algorithms/send/sycl/send_pcie.cpp
 
         coll/algorithms/utils/sycl_coll_base.cpp
         coll/algorithms/utils/sycl_pipe_send.cpp
@@ -205,7 +206,6 @@ set(CCL_SRC
     common/utils/utils.cpp
     common/utils/version.cpp
     common/utils/yield.cpp
-    common/utils/comm_profile.cpp
 
     common/api_wrapper/api_wrapper.cpp
     common/api_wrapper/mpi_api_wrapper.cpp

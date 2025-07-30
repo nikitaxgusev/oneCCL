@@ -339,8 +339,10 @@ bool ccl_can_use_topo_algo(const ccl_selector_param& param) {
                     "no p2p access between devices");
     // WA
     if (!ccl::global_data::env().enable_wa_fabric_vertex_connection_check) {
-        RETURN_FALSE_IF(!param.comm->get_topo_manager().has_all_vertices_connected(),
-                        "no connection between vertices");
+        RETURN_FALSE_IF(
+            !param.comm->get_topo_manager().has_all_vertices_connected() &&
+                !ccl::ze::is_arc_card(ccl::ze::get_device_family(param.stream->get_ze_device())),
+            "no connection between vertices");
     }
 
     RETURN_FALSE_IF(!param.comm->get_topo_manager().has_same_ppn(),

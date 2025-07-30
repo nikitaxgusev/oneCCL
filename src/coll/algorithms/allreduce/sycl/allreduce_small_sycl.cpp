@@ -34,8 +34,7 @@ int allreduce_small_buffer_index = 0;
 
 #define SWITCH_RUN_TYPE(TYPE, ccl_type) \
     case ccl_type: \
-        e = ar_small_##TYPE.allreduce( \
-            queue, in_buf, out_buf, dtype, count, reduction, deps, done); \
+        e = ar_small_##TYPE.allreduce(queue, in_buf, out_buf, dtype, count, deps, done); \
         break;
 
 #define SWITCH_TYPE_UNSUPPORTED(TYPE, ccl_type) \
@@ -71,7 +70,6 @@ ccl::event run_allreduce_small(ccl::datatype dtype,
                                const void *in_buf,
                                void *out_buf,
                                size_t count,
-                               ccl::reduction reduction,
                                const ccl::vector_class<ccl::event> &deps,
                                bool &done) {
     ccl::event e;
@@ -100,7 +98,7 @@ ccl::event allreduce_small(const void *send_buf,
     }
     else {
         LOG_DEBUG("invoking allreduce_small");
-        coll_init(comm, global_stream);
+        //        coll_init(comm, global_stream);
     }
 
     auto lambda = [&]<typename T, int NE, int NP>() {

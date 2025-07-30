@@ -83,7 +83,7 @@ environment::create_communicators(const int comm_size,
                                   const ContextType& context,
                                   shared_ptr_class<kvs_interface> kvs,
                                   const comm_attr& attr) const {
-    return communicator::create_communicators(comm_size, local_devices, context, kvs, attr);
+    return communicator::create_communicators(comm_size, local_devices, context, kvs);
 }
 
 template <class DeviceType, class ContextType>
@@ -93,7 +93,7 @@ environment::create_communicatorsExt(const int comm_size,
                                      const ContextType& context,
                                      shared_ptr_class<kvs_interface> kvs,
                                      const comm_attr& attr) const {
-    return communicator::create_communicatorsExt(comm_size, local_devices, context, kvs, attr);
+    return communicator::create_communicatorsExt(comm_size, local_devices, context, kvs);
 }
 
 template <class DeviceType, class ContextType>
@@ -103,7 +103,7 @@ vector_class<communicator> CCL_API environment::create_communicators(
     const ContextType& context,
     shared_ptr_class<kvs_interface> kvs,
     const comm_attr& attr) const {
-    return communicator::create_communicators(comm_size, local_rank_device_map, context, kvs, attr);
+    return communicator::create_communicators(comm_size, local_rank_device_map, context, kvs);
 }
 
 template <class DeviceType, class ContextType>
@@ -113,8 +113,7 @@ vector_class<communicator> CCL_API environment::create_communicatorsExt(
     const ContextType& context,
     shared_ptr_class<kvs_interface> kvs,
     const comm_attr& attr) const {
-    return communicator::create_communicatorsExt(
-        comm_size, local_rank_device_map, context, kvs, attr);
+    return communicator::create_communicatorsExt(comm_size, local_rank_device_map, context, kvs);
 }
 
 template <class DeviceType, class ContextType>
@@ -124,7 +123,7 @@ environment::create_communicators(const int comm_size,
                                   const ContextType& context,
                                   shared_ptr_class<kvs_interface> kvs,
                                   const comm_attr& attr) const {
-    return communicator::create_communicators(comm_size, local_rank_device_map, context, kvs, attr);
+    return communicator::create_communicators(comm_size, local_rank_device_map, context, kvs);
 }
 
 template <class DeviceType, class ContextType>
@@ -134,8 +133,7 @@ environment::create_communicatorsExt(const int comm_size,
                                      const ContextType& context,
                                      shared_ptr_class<kvs_interface> kvs,
                                      const comm_attr& attr) const {
-    return communicator::create_communicatorsExt(
-        comm_size, local_rank_device_map, context, kvs, attr);
+    return communicator::create_communicatorsExt(comm_size, local_rank_device_map, context, kvs);
 }
 
 } // namespace detail

@@ -18,44 +18,42 @@ The benchmark is distributed with the oneCCL package. You can find it in the exa
 Build oneCCL Benchmark
 ***********************
 
+CPU-Only
+^^^^^^^^^
+
 To build the benchmark, complete the following steps:
 
-.. tab-set::
+1. Configure your environment. Source the installed oneCCL library for the CPU-only support:
 
-    .. tab-item:: CPU-Only
+   .. code::
 
-      
+      source <oneCCL install dir>/ccl/latest/env/vars.sh --ccl-configuration=cpu
 
-      #. Configure your environment. Source the installed oneCCL library for the CPU-only support:
+2. Navigate to ``<oneCCL install dir>/share/doc/ccl/examples``
+3. Build the benchmark with the following command:
 
-         .. code::
+   .. code::
 
-            source <oneCCL install dir>/ccl/latest/env/vars.sh --ccl-configuration=cpu
+      cmake -S . -B build -DCMAKE_INSTALL_PREFIX=$(pwd)/build/_install && cmake --build build -j $(nproc) -t install
 
-      #. Navigate to ``<oneCCL install dir>/share/doc/ccl/examples``
-      #. Build the benchmark with the following command:
+CPU-GPU
+^^^^^^^^
 
-         .. code::
+1. Configure your environment.
 
-            cmake -S . -B build -DCMAKE_INSTALL_PREFIX=$(pwd)/build/_install && cmake --build build -j $(nproc) -t install
+   * Source the SYCL compiler. See the `documentation <https://www.intel.com/content/www/us/en/docs/dpcpp-cpp-compiler/get-started-guide/2024-2/overview.html>`_ for the instructions.
+   * Source the installed oneCCL library for the CPU-GPU support:
 
-    .. tab-item:: CPU-GPU
+     .. code::
 
-       #. Configure your environment.
+        source <oneCCL install dir>/ccl/latest/env/vars.sh --ccl-configuration=cpu_gpu_dpcpp
 
-          * Source the SYCL compiler. See the `documentation <https://www.intel.com/content/www/us/en/docs/dpcpp-cpp-compiler/get-started-guide/2024-2/overview.html>`_ for the instructions.
-          * Source the installed oneCCL library for the CPU-GPU support:
+2. Navigate to ``<oneCCL install dir>/share/doc/ccl/examples``.
+3. Build the SYCL benchmark with the following command:
 
-          .. code::
+   .. code::
 
-             source <oneCCL install dir>/ccl/latest/env/vars.sh --ccl-configuration=cpu_gpu_dpcpp
-
-       #. Navigate to ``<oneCCL install dir>/share/doc/ccl/examples``.
-       #. Build the SYCL benchmark with the following command:
-
-          .. code::
-
-             cmake -S . -B build -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx -DCOMPUTE_BACKEND=dpcpp -DCMAKE_INSTALL_PREFIX=$(pwd)/build/_install && cmake --build build -j $(nproc) -t install
+      cmake -S . -B build -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx -DCOMPUTE_BACKEND=dpcpp -DCMAKE_INSTALL_PREFIX=$(pwd)/build/_install && cmake --build build -j $(nproc) -t install
 
 
 Run oneCCL Benchmark
@@ -187,41 +185,50 @@ The benchmark accepts the following arguments:
 Example
 ********
 
-.. tab-set::
+GPU
+^^^^
 
-  .. tab-item:: GPU
+The following example shows how to run the benchmark with the GPU buffers:
 
-    The following example shows how to run the benchmark with the GPU buffers:
+.. code::
 
-    .. code::
+   mpirun -n <N> -ppn <P> benchmark -a gpu -m usm -u device -l allreduce -i 20 -f 1024 -t 67108864  -j off -d float32 -p 0 -e in_order
 
-       mpirun -n <N> -ppn <P> benchmark -a gpu -m usm -u device -l allreduce -i 20 -f 1024 -t 67108864  -j off -d float32 -p 0 -e in_order
+The above command runs:
 
-    The above command runs:
-
-    * The ``allreduce`` benchmark
-    * With a total of ``N`` processes
-    * With ``P`` processes per node allocating the memory in the GPU
-    * 20 iterations
-    * Use SYCL Unified Shared Memory (USM) of the device type
-    * With the element count from 1024 to 67108864 (the benchmark runs with all the powers on two in that range) of float32 datatype, assuming the collective is not persistent and using a SYCL in-order queue.
-
-
-  .. tab-item:: CPU
-    
-    The following example shows how to run the benchmark with the CPU buffers:
-
-    .. code::
-
-       mpirun -n <N> -ppn <P> benchmark -l allreduce -i 20 -f 1024 -t 67108864  -j off -d float32 -p 0
-
-    The above command specifies to run:
-
-    * The ``allreduce`` benchmark
-    * With a total of ``N`` processes
-    * With ``P`` processes per node
-    * 20 iterations
-    * With the element count from 1024 to 67108864 (the benchmark runs with all the powers on two in that range) of float32 datatype, assuming the collective is not persistent
+* The ``allreduce`` benchmark
+* With a total of ``N`` processes
+* With ``P`` processes per node allocating the memory in the GPU
+* Using SYCL Unified Shared Memory (USM) of the device type
+* 20 iterations
+* With the element count from 1024 to 67108864 (the benchmark runs with all the powers on two in that range) of float32 datatype, assuming the collective is not persistent and using a SYCL in-order queue
 
 
-      
+Similar for ``allreduce`` and ``reduce``:
+
+.. code::
+
+   mpirun -n <N> -ppn <P> benchmark -a gpu -m usm -u device -l allreduce,reduce -i 20 -f 1024 -t 67108864  -j off -d float32 -p 0 -e in_order
+
+
+CPU
+^^^^
+
+.. code::
+
+   mpirun -n <N> -ppn <P> benchmark -l allreduce -i 20 -f 1024 -t 67108864  -j off -d float32 -p 0
+
+The above command specifies to run
+
+* The ``allreduce`` benchmark
+* With a total of ``N`` processes
+* With ``P`` processes per node
+* 20 iterations
+* With the element count from 1024 to 67108864 (the benchmark runs with all the powers on two in that range) of float32 datatype, assuming the collective is not persistent
+
+
+Similar for ``allreduce`` and ``reduce``:
+
+.. code::
+
+   mpirun -n <N> -ppn <P> benchmark -l allreduce,reduce -i 20 -f 1024 -t 67108864  -j off -d float32 -p 0

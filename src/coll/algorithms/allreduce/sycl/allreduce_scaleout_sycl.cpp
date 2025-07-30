@@ -185,9 +185,6 @@ ccl::event allreduce_scaleout_sycl(sycl::queue& q,
 #ifdef CCL_ENABLE_ITT
             ccl::profile::itt::task_end();
 #endif // CCL_ENABLE_ITT
-            if (!done) {
-                goto fallback;
-            }
             return ccl::event::create_from_native(ev);
         case allreduce_scaleout_algo::ring:
 #ifdef CCL_ENABLE_ITT
@@ -212,35 +209,31 @@ ccl::event allreduce_scaleout_sycl(sycl::queue& q,
 #ifdef CCL_ENABLE_ITT
             ccl::profile::itt::task_end();
 #endif // CCL_ENABLE_ITT
-            if (!done) {
-                goto fallback;
-            }
             return ccl::event::create_from_native(ev);
-        default: goto fallback;
+        default:
+#ifdef CCL_ENABLE_ITT
+            ccl::profile::itt::task_begin(
+                "allreduce_scaleout_sycl_simple", "send_size", count * ccl_dtype.size());
+#endif // CCL_ENABLE_ITT
+            LOG_DEBUG(
+                "|CCL_SYCL| allreduce scaleout selects default simple (direct) kernel, count:",
+                count,
+                " datatype: ",
+                dtype);
+            ev = allreduce_scaleout_sycl_simple(q,
+                                                send_buf,
+                                                recv_buf,
+                                                count,
+                                                dtype,
+                                                reduction,
+                                                comm,
+                                                deps,
+                                                done,
+                                                copy_to_host,
+                                                is_cpu_buffers);
+#ifdef CCL_ENABLE_ITT
+            ccl::profile::itt::task_end();
+#endif // CCL_ENABLE_ITT
+            return ccl::event::create_from_native(ev);
     }
-
-fallback:
-#ifdef CCL_ENABLE_ITT
-    ccl::profile::itt::task_begin(
-        "allreduce_scaleout_sycl_simple", "send_size", count * ccl_dtype.size());
-#endif // CCL_ENABLE_ITT
-    LOG_DEBUG("|CCL_SYCL| allreduce scaleout selects default simple (direct) kernel, count:",
-              count,
-              " datatype: ",
-              dtype);
-    ev = allreduce_scaleout_sycl_simple(q,
-                                        send_buf,
-                                        recv_buf,
-                                        count,
-                                        dtype,
-                                        reduction,
-                                        comm,
-                                        deps,
-                                        done,
-                                        copy_to_host,
-                                        is_cpu_buffers);
-#ifdef CCL_ENABLE_ITT
-    ccl::profile::itt::task_end();
-#endif // CCL_ENABLE_ITT
-    return ccl::event::create_from_native(ev);
 }

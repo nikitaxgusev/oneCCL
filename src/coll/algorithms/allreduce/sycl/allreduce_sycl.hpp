@@ -30,7 +30,6 @@
                                        const void* in_buf, \
                                        void* out_buf, \
                                        size_t count, \
-                                       ccl::reduction reduction, \
                                        const ccl::vector_class<ccl::event>& deps, \
                                        bool& done);
 

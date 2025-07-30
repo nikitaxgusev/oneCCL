@@ -13,6 +13,7 @@
  See the License for the specific language governing permissions and
  limitations under the License.
 */
+#include "coll/algorithms/utils/sycl_coll_base.hpp"
 #include "coll/algorithms/allgatherv/sycl/allgatherv_sycl.hpp"
 
 namespace ccl {
@@ -29,7 +30,7 @@ ccl::event allgather_sycl_single_node(sycl::queue& q,
                                       ccl_stream* global_stream,
                                       const vector_class<event>& deps,
                                       bool& done,
-                                      sycl_coll_scaleup_attr coll_attr) {
+                                      bool wait_on_deps) {
     ccl::event e;
     done = true;
 
@@ -56,10 +57,9 @@ ccl::event allgather_sycl_single_node(sycl::queue& q,
         std::vector<sycl::event> dep_events = get_sycl_events(deps);
         if (send_buf != recv_buf) {
             LOG_DEBUG("single rank: out-of-place case, coll: allgatherv");
-            void* dst_buf = offsets.empty() ? recv_buf : (char*)recv_buf + offsets[0];
             sycl_e = q.submit([=](sycl::handler& h) {
                 h.depends_on(dep_events);
-                h.memcpy(dst_buf, send_buf, send_count * ccl_dtype.size());
+                h.memcpy(recv_buf, send_buf, send_count * ccl_dtype.size());
             });
         }
         else {
@@ -71,7 +71,7 @@ ccl::event allgather_sycl_single_node(sycl::queue& q,
 
     // PCIe ring LL256
     if (is_arc_card(ccl::ze::get_device_family(global_stream->get_ze_device()))) {
-        if (!is_aligned(send_buf, recv_buf, send_count, ccl_dtype.size(), 4) ||
+        if (!is_aligned(send_buf, recv_buf, send_count * ccl_dtype.size(), 4) ||
             ccl::global_data::env().sycl_enable_arc_allreduce) {
             done = false;
             return e;
@@ -102,8 +102,16 @@ ccl::event allgather_sycl_single_node(sycl::queue& q,
             ccl::profile::itt::task_begin("allgatherv_large", "send_size", send_count * ccl_dtype.size());
 #endif // CCL_ENABLE_ITT
             LOG_DEBUG("|CCL_SYCL| invoking large allgatherv: count: ", send_count, " datatype: ", dtype);
-            e = allgatherv_large(
-                send_buf, send_count, recv_buf, recv_counts, offsets, dtype, comm, global_stream, deps, coll_attr);
+            e = allgatherv_large(send_buf,
+                                 send_count,
+                                 recv_buf,
+                                 recv_counts,
+                                 offsets,
+                                 dtype,
+                                 comm,
+                                 global_stream,
+                                 deps,
+                                 wait_on_deps);
             LOG_DEBUG(
                 "|CCL_SYCL| allgatherv selects large kernel: count: ", send_count, " datatype: ", dtype, " done");
 #ifdef CCL_ENABLE_ITT
@@ -220,6 +228,15 @@ ccl::event allgatherv_sycl_multi_node(sycl::queue& q,
     }
 
     size_t node_size = node_comm->size();
+    std::vector<size_t> node_offsets(r2r_size);
+    node_offsets[0] = 0;
+    auto first = recv_counts.begin();
+    auto last = first + node_size;
+    for (int i = 1; i < r2r_size; i++) {
+        node_offsets[i] = std::accumulate(first, last, node_offsets[i - 1]);
+        first += node_size;
+        last += node_size;
+    }
 
     std::vector<size_t> global_offsets(recv_counts.size());
     global_offsets[0] = 0;
@@ -240,8 +257,6 @@ ccl::event allgatherv_sycl_multi_node(sycl::queue& q,
             scaleout_offsets[i] = (i * pack_count) * ccl_dtype.size();
         }
 
-        sycl_allgatherv_tune_attr scaleout_tune_attr =
-            allgatherv_select_tune_attr(pack_count * ccl_dtype.size(), r2r_comm->size(), ccl_dtype);
         ev = allgatherv_scaleout_sycl(q,
                                       scaleout_send,
                                       pack_count,
@@ -252,7 +267,7 @@ ccl::event allgatherv_sycl_multi_node(sycl::queue& q,
                                       iter == 0 ? deps : evs,
                                       iter == 0 ? true : false,
                                       done,
-                                      scaleout_tune_attr,
+                                      true,
                                       false);
         if (!done) {
             LOG_INFO("allgatherv_sycl scaleout was not done -- falling back");
@@ -265,8 +280,6 @@ ccl::event allgatherv_sycl_multi_node(sycl::queue& q,
         // ----- Scaleup Allgatherv Inplace Phase -----
         {
             std::vector<size_t> scaleup_counts(node_size, pack_count);
-            sycl_coll_scaleup_attr coll_attr;
-            coll_attr.force_use_tmp = true;
             for (int i = 0; i < r2r_size; i++) {
                 std::vector<size_t> scaleup_offsets(global_offsets.begin() + i * node_size,
                                                     global_offsets.begin() + (i + 1) * node_size);
@@ -280,21 +293,19 @@ ccl::event allgatherv_sycl_multi_node(sycl::queue& q,
                                                 node_comm,
                                                 global_stream,
                                                 evs,
-                                                done,
-                                                coll_attr);
+                                                done);
 
                 if (!done) {
                     // fallback
                     LOG_ERROR("allgatherv_sycl allgatherv single node was not done -- falling back");
                     return ev;
                 }
-
-                evs.clear();
-                evs.push_back(std::move(ev));
             }
         }
 
         if (iter < nchunks - 1) {
+            evs.clear();
+            evs.push_back(std::move(ev));
             send_offset += pack_count;
 
             for (int i = 0; i < global_offsets.size(); i++) {
@@ -303,10 +314,9 @@ ccl::event allgatherv_sycl_multi_node(sycl::queue& q,
         }
     }
 
-    //auto sycl_ev = ev.get_native();
-    auto sycl_evs = get_sycl_events(evs);
+    auto sycl_ev = ev.get_native();
     auto e = q.submit([=](sycl::handler& h) {
-        h.depends_on(sycl_evs);
+        h.depends_on(sycl_ev);
         h.host_task([=]() {
             global_comm->put_scaleout_device_buf(scaleout_buf);
         });

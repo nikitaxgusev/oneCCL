@@ -36,14 +36,14 @@ ccl::event allgatherv_ll_ring(const void *send_buf,
     const int comm_size = node_comm->size();
     const int comm_rank = node_comm->rank();
 
-    coll_init(comm, global_stream);
+    //    coll_init(comm, global_stream);
 
     auto ccl_dtype = ccl::global_data::get().dtypes->get(dtype);
     size_t dt_sz = ccl_dtype.size();
     size_t send_size = send_count * ccl_dtype.size();
 
     bool p2p = node_comm->get_topo_manager().has_p2p_access();
-    uint32_t pattern = pattern_counter;
+    uint32_t pattern = comm->get_rt_pattern(pattern_type::collective, -1);
 
     auto lambda = [&]<typename T, int NRanks, template <typename, int> class Proto>() {
         T *peerbuf0[NRanks];
@@ -67,7 +67,7 @@ ccl::event allgatherv_ll_ring(const void *send_buf,
                                                                           p2p,
                                                                           done);
         // update pattern
-        pattern_counter = pattern;
+        comm->update_rt_pattern(pattern_type::collective, -1, pattern);
         return e;
     };
 

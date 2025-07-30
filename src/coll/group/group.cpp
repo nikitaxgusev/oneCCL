@@ -53,28 +53,32 @@ void group_impl::end() {
         }
         first_group_op = false; // needed in case operation_storage is empty
         // wait() is needed to avoid oneCCL destruction prior to device tasks completion
-        event.wait();
+        if (event) {
+            event.wait();
+        }
         if (post_processing_steps.size()) {
 #ifdef CCL_ENABLE_SYCL
-            sycl_queue.submit([=](sycl::handler& h) {
-                h.host_task([=]() {
+            sycl_queue
+                .submit([=](sycl::handler& h) {
+                    h.host_task([=]() {
 #endif // CCL_ENABLE_SYCL
-                    std::vector<atl_req_t> ack_reqs(post_processing_steps.size());
-                    bool post_processing_steps_done = false;
-                    bool init = true;
-                    while (!post_processing_steps_done) {
-                        post_processing_steps_done = true;
-                        for (size_t i = 0; i < post_processing_steps.size(); i++) {
-                            auto& step = post_processing_steps[i];
-                            if (!step(ack_reqs[i], init)) {
-                                post_processing_steps_done = false;
+                        std::vector<atl_req_t> ack_reqs(post_processing_steps.size());
+                        bool post_processing_steps_done = false;
+                        bool init = true;
+                        while (!post_processing_steps_done) {
+                            post_processing_steps_done = true;
+                            for (size_t i = 0; i < post_processing_steps.size(); i++) {
+                                auto& step = post_processing_steps[i];
+                                if (!step(ack_reqs[i], init)) {
+                                    post_processing_steps_done = false;
+                                }
                             }
+                            init = false;
                         }
-                        init = false;
-                    }
 #ifdef CCL_ENABLE_SYCL
-                });
-            });
+                    });
+                })
+                .wait();
 #endif // CCL_ENABLE_SYCL
         }
 #ifdef CCL_ENABLE_SYCL

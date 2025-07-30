@@ -20,7 +20,6 @@
 
 #if defined(CCL_ENABLE_ZE) || defined(CCL_ENABLE_SYCL)
 #include "comm/comm_interface.hpp"
-#include "coll/algorithms/utils/sycl_coll_base.hpp"
 #endif //#if defined(CCL_ENABLE_ZE) || defined(CCL_ENABLE_SYCL)
 
 #include "common/global/global.hpp"
@@ -29,13 +28,7 @@
 // dispatching between SYCL path and Scheduler path
 bool can_use_sycl_kernels(const ccl_selector_param& param);
 
-// scale-up attributes used for various purposes
-struct sycl_coll_scaleup_attr {
-    bool wait_on_deps{ false };
-    bool force_use_tmp{ false };
-};
-
-// scale-out collective tuning parameters
+// collective tuning parameters
 enum class allreduce_scaleout_algo { direct, rabenseifner, ring };
 enum class reduce_scatter_scaleout_algo { direct, ring };
 enum class allgatherv_scaleout_algo { direct, ring };
@@ -70,8 +63,4 @@ size_t reduce_scatter_select_chunk_size(reduce_scatter_scaleout_algo algo,
                                         size_t comm_size);
 
 // allgatherv
-sycl_allgatherv_tune_attr allgatherv_select_tune_attr(size_t size,
-                                                      size_t comm_size,
-                                                      ccl_datatype ccl_dtype);
-
-size_t allgatherv_select_chunk_size(allgatherv_scaleout_algo algo, size_t size, size_t comm_size);
+size_t allgatherv_select_chunk_size();

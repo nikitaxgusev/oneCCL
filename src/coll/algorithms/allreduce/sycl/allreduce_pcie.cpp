@@ -34,7 +34,7 @@ ccl::event allreduce_ll_ring(const void *src,
     const int comm_size = node_comm->size();
     const int comm_rank = node_comm->rank();
 
-    coll_init(comm, global_stream);
+    //    coll_init(comm, global_stream);
 
     auto ccl_dtype = ccl::global_data::get().dtypes->get(dtype);
     size_t dt_sz = ccl_dtype.size();
@@ -42,7 +42,7 @@ ccl::event allreduce_ll_ring(const void *src,
         q.memcpy(dst, src, dt_sz * count);
 
     bool p2p = node_comm->get_topo_manager().has_p2p_access();
-    uint32_t pattern = pattern_counter;
+    uint32_t pattern = comm->get_rt_pattern(pattern_type::collective, -1);
 
     auto lambda = [&]<typename T, int NRanks, template <typename, int> class Proto>() {
         T *peerbuf0[NRanks];
@@ -64,7 +64,7 @@ ccl::event allreduce_ll_ring(const void *src,
                                                                           q,
                                                                           p2p,
                                                                           done);
-        pattern_counter = pattern;
+        comm->update_rt_pattern(pattern_type::collective, -1, pattern);
         return e;
     };
 

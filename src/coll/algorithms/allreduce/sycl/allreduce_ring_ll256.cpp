@@ -42,6 +42,8 @@ static inline message_t sum_kernel(message_t &dst, message_t &src, const ccl_dat
     message_t data;
 
     switch (dtype.idx()) {
+        case ccl::datatype::int8: data = _sum<int8_t>(dst, src); break;
+        case ccl::datatype::uint8: data = _sum<uint8_t>(dst, src); break;
         case ccl::datatype::float16: data = _sum<sycl::half>(dst, src); break;
         case ccl::datatype::bfloat16:
             data = _sum<sycl::_V1::ext::oneapi::bfloat16>(dst, src);
@@ -402,7 +404,7 @@ ccl::event arc_allreduce(const void *src,
                          ccl::reduction reduction,
                          ccl_comm *comm,
                          ccl_stream *global_stream) {
-    coll_init(comm, global_stream);
+    //    coll_init(comm, global_stream);
 
     auto e = arc_ll256_allreduce(src, dst, count, dtype, reduction, comm, global_stream);
 

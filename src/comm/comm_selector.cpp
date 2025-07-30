@@ -44,42 +44,28 @@ comm_interface_ptr comm_selector::create_comm_impl() {
     return comm_interface_ptr(new ccl_comm());
 }
 
-comm_interface_ptr comm_selector::create_comm_impl(const comm_attr& attr) {
-    CCL_THROW_IF_NOT(ccl::global_data::env().backend == backend_mode::native,
-                     "host communicator is only supported for native backend");
-
-    ccl_comm_attr_impl internal_attr(attr);
-    return comm_interface_ptr(new ccl_comm(internal_attr));
-}
-
 comm_interface_ptr comm_selector::create_comm_impl(const size_t size,
-                                                   shared_ptr_class<kvs_interface> kvs,
-                                                   const comm_attr& attr) {
+                                                   shared_ptr_class<kvs_interface> kvs) {
     CCL_THROW_IF_NOT(ccl::global_data::env().backend == backend_mode::native,
                      "host communicator is only supported for native backend");
 
-    ccl_comm_attr_impl internal_attr(attr);
-    return comm_interface_ptr(ccl_comm::create(size, std::move(kvs), internal_attr));
+    return comm_interface_ptr(ccl_comm::create(size, std::move(kvs)));
 }
 
 comm_interface_ptr comm_selector::create_comm_impl(const size_t size,
                                                    const int rank,
-                                                   shared_ptr_class<kvs_interface> kvs,
-                                                   const comm_attr& attr) {
+                                                   shared_ptr_class<kvs_interface> kvs) {
     CCL_THROW_IF_NOT(ccl::global_data::env().backend == backend_mode::native,
                      "host communicator is only supported for native backend");
 
-    ccl_comm_attr_impl internal_attr(attr);
-    return comm_interface_ptr(ccl_comm::create(size, rank, std::move(kvs), internal_attr));
+    return comm_interface_ptr(ccl_comm::create(size, rank, std::move(kvs)));
 }
 
 comm_interface_ptr comm_selector::create_comm_impl(const size_t size,
                                                    const int rank,
                                                    device_t device,
                                                    context_t context,
-                                                   shared_ptr_class<kvs_interface> kvs,
-                                                   const comm_attr& attr) {
-    ccl_comm_attr_impl internal_attr(attr);
+                                                   shared_ptr_class<kvs_interface> kvs) {
 #if defined(CCL_ENABLE_ZE) && defined(CCL_ENABLE_SYCL)
     if (ccl::global_data::env().backend == backend_mode::native) {
         if (device.get_native().is_gpu()) {
@@ -90,14 +76,12 @@ comm_interface_ptr comm_selector::create_comm_impl(const size_t size,
 
 #ifdef CCL_ENABLE_STUB_BACKEND
     if (ccl::global_data::env().backend == backend_mode::stub) {
-        // does not pass comm_attr to stub_comm for now
         return comm_interface_ptr(
             ccl::stub_comm::create(device, context, size, rank, std::move(kvs)));
     }
 #endif // CCL_ENABLE_STUB_BACKEND
 
-    return comm_interface_ptr(
-        ccl_comm::create(device, context, size, rank, std::move(kvs), internal_attr));
+    return comm_interface_ptr(ccl_comm::create(device, context, size, rank, std::move(kvs)));
 }
 
 comm_interface_ptr comm_selector::create_comm_implExt() {
@@ -108,31 +92,27 @@ comm_interface_ptr comm_selector::create_comm_implExt() {
 }
 
 comm_interface_ptr comm_selector::create_comm_implExt(const size_t size,
-                                                      shared_ptr_class<kvs_interface> kvs,
-                                                      const comm_attr& attr) {
+                                                      shared_ptr_class<kvs_interface> kvs) {
     CCL_THROW_IF_NOT(ccl::global_data::env().backend == backend_mode::native,
                      "host communicator is only supported for native backend");
-    ccl_comm_attr_impl internal_attr(attr);
-    return comm_interface_ptr(ccl_comm::create(size, kvs, internal_attr));
+
+    return comm_interface_ptr(ccl_comm::create(size, kvs));
 }
 
 comm_interface_ptr comm_selector::create_comm_implExt(const size_t size,
                                                       const int rank,
-                                                      shared_ptr_class<kvs_interface> kvs,
-                                                      const comm_attr& attr) {
+                                                      shared_ptr_class<kvs_interface> kvs) {
     CCL_THROW_IF_NOT(ccl::global_data::env().backend == backend_mode::native,
                      "host communicator is only supported for native backend");
-    ccl_comm_attr_impl internal_attr(attr);
-    return comm_interface_ptr(ccl_comm::create(size, rank, std::move(kvs), internal_attr));
+
+    return comm_interface_ptr(ccl_comm::create(size, rank, std::move(kvs)));
 }
 
 comm_interface_ptr comm_selector::create_comm_implExt(const size_t size,
                                                       const int rank,
                                                       device_t device,
                                                       context_t context,
-                                                      shared_ptr_class<kvs_interface> kvs,
-                                                      const comm_attr& attr) {
-    ccl_comm_attr_impl internal_attr(attr);
+                                                      shared_ptr_class<kvs_interface> kvs) {
 #if defined(CCL_ENABLE_ZE) && defined(CCL_ENABLE_SYCL)
     if (ccl::global_data::env().backend == backend_mode::native) {
         if (device.get_native().is_gpu()) {
@@ -143,11 +123,10 @@ comm_interface_ptr comm_selector::create_comm_implExt(const size_t size,
 
 #ifdef CCL_ENABLE_STUB_BACKEND
     if (ccl::global_data::env().backend == backend_mode::stub) {
-        // does not pass comm_attr to stub_comm for now
         return comm_interface_ptr(ccl::stub_comm::create(device, context, size, rank, kvs));
     }
 #endif // CCL_ENABLE_STUB_BACKEND
 
-    return comm_interface_ptr(ccl_comm::createExt(device, context, size, rank, kvs, internal_attr));
+    return comm_interface_ptr(ccl_comm::createExt(device, context, size, rank, kvs));
 }
 } // namespace ccl
