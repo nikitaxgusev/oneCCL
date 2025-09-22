@@ -36,7 +36,6 @@ int allreduce_medium_buffer_index = 0;
                                            const void *in_buf, \
                                            void *out_buf, \
                                            size_t count, \
-                                           ccl::reduction reduction, \
                                            const ccl::vector_class<ccl::event> &deps, \
                                            bool &done)
 
@@ -67,8 +66,7 @@ void init_allreduce_medium(ccl::datatype dtype,
 
 #define SWITCH_RUN_TYPE(TYPE, ccl_type) \
     case ccl_type: \
-        e = run_allreduce_medium_##TYPE( \
-            dtype, queue, in_buf, out_buf, count, reduction, deps, done); \
+        e = run_allreduce_medium_##TYPE(dtype, queue, in_buf, out_buf, count, deps, done); \
         break;
 
 ccl::event run_allreduce_medium(ccl::datatype dtype,
@@ -76,7 +74,6 @@ ccl::event run_allreduce_medium(ccl::datatype dtype,
                                 const void *in_buf,
                                 void *out_buf,
                                 size_t count,
-                                ccl::reduction reduction,
                                 const ccl::vector_class<ccl::event> &deps,
                                 bool &done) {
     ccl::event e;

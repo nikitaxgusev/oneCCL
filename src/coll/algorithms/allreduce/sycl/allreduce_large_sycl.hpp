@@ -664,41 +664,30 @@ public:
     ccl::event allreduce(sycl::queue &queue,
                          const void *in_buffer,
                          void *out_buffer,
-                         ccl::datatype dtype,
                          size_t size,
-                         ccl::reduction reduction,
                          const ccl::vector_class<ccl::event> &deps,
                          bool &done) {
-        sycl::event e;
         done = true;
         // check local alignment
         bool is_aligned = (size_t)in_buffer % 4 == 0 && (size_t)out_buffer % 4 == 0;
 
         if (ccl::global_data::env().sycl_allreduce_tmp_buf) {
             if (is_aligned)
-                e = allreduce_copy<4>(queue, in_buffer, out_buffer, size);
+                return allreduce_copy<4>(queue, in_buffer, out_buffer, size);
             else
-                e = allreduce_copy<2>(queue, in_buffer, out_buffer, size);
+                return allreduce_copy<2>(queue, in_buffer, out_buffer, size);
         }
         else {
-            e = allreduce_nocopy(queue, in_buffer, out_buffer, size, done);
+            return allreduce_nocopy(queue, in_buffer, out_buffer, size, done);
         }
-
-        if (reduction == ccl::reduction::avg) {
-            std::vector<sycl::event> evs;
-            evs.push_back(e);
-            e = sycl_average(queue, out_buffer, size, world, dtype, evs);
-        }
-
-        return ccl::event::create_from_native(e);
     }
 
 private:
     template <size_t align>
-    sycl::event allreduce_copy(sycl::queue &queue,
-                               const void *in_buffer,
-                               void *out_buffer,
-                               size_t size) {
+    ccl::event allreduce_copy(sycl::queue &queue,
+                              const void *in_buffer,
+                              void *out_buffer,
+                              size_t size) {
         using namespace __ESIMD_NS;
         using namespace __ESIMD_ENS;
 
@@ -994,15 +983,15 @@ private:
         allreduce_large_buffer_index += sync_reset_counter;
         allreduce_large_buffer_index %= COPY_KERNEL_NUM;
 
-        return e;
+        return ccl::event::create_from_native(e);
     }
 
     // perform IPC exchange every time
-    sycl::event allreduce_nocopy(sycl::queue &queue,
-                                 const void *in_buffer,
-                                 void *out_buffer,
-                                 size_t size,
-                                 bool &done) {
+    ccl::event allreduce_nocopy(sycl::queue &queue,
+                                const void *in_buffer,
+                                void *out_buffer,
+                                size_t size,
+                                bool &done) {
         using namespace __ESIMD_NS;
         using namespace __ESIMD_ENS;
 
@@ -1043,12 +1032,12 @@ private:
                                     NULL,
                                     (void **)out_buffers);
         // ignore size, size does not matter if buffers are aligned
-        int align4 = all_aligned((void **)in_buffers, temp_world, 1, 4, 4) &&
-                     all_aligned((void **)out_buffers, temp_world, 1, 4, 4);
+        int align4 = all_aligned((void **)in_buffers, temp_world, 4, 4) &&
+                     all_aligned((void **)out_buffers, temp_world, 4, 4);
         if (!align4) {
             // ESIMD performance on 2-byte alignment is not good, fallback
             done = false;
-            return e;
+            return ccl::event::create_from_native(e);
         }
         done = true;
 
@@ -1202,7 +1191,7 @@ private:
         allreduce_large_buffer_index += sync_reset_counter;
         allreduce_large_buffer_index %= NOCOPY_BUFFER_COUNT;
 
-        return e;
+        return ccl::event::create_from_native(e);
     }
 
     //sync all the ranks here before consuming the results.
@@ -1414,9 +1403,7 @@ private:
                                           const void *in_buf, \
                                           void *out_buf, \
                                           size_t count, \
-                                          ccl::reduction reduction, \
                                           const ccl::vector_class<ccl::event> &deps, \
                                           bool &done) { \
-        return ar_large_##TYPE.allreduce( \
-            queue, in_buf, out_buf, dtype, count, reduction, deps, done); \
+        return ar_large_##TYPE.allreduce(queue, in_buf, out_buf, count, deps, done); \
     }

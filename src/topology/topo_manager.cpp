@@ -785,9 +785,7 @@ void topo_manager::fill_ze_intra_colors(const rank_info_vec_t& local_info_vec) {
     // card = pci_addr + vector of ranks on this card
     // further these ranks will be grouped
     // according to max_ranks_per_card threshold
-#ifdef ZE_PCI_PROPERTIES_EXT_NAME
-    using card_info_t = typename std::pair<ze_pci_address_ext_t, std::vector<int>>;
-#endif // ZE_PCI_PROPERTIES_EXT_NAME
+    using card_info_t = typename std::pair<zes_pci_address_t, std::vector<int>>;
 
     std::vector<card_info_t> cards;
 
@@ -834,10 +832,7 @@ void topo_manager::fill_ze_inter_colors() {
         // subsequent ranks with same address are skipped and added into separate plane
         // index - plane index
         // value - set of unique pci addresses within this plane
-#ifdef ZE_PCI_PROPERTIES_EXT_NAME
-        std::vector<std::set<ze_pci_address_ext_t, ccl::ze::pci_address_comparator>>
-            plane_pci_addrs;
-#endif // ZE_PCI_PROPERTIES_EXT_NAME
+        std::vector<std::set<zes_pci_address_t, ccl::ze::pci_address_comparator>> plane_pci_addrs;
 
         // service container with set of ranks already used in one of planes
         // these ranks are not used for creation of subsequent planes
@@ -1019,24 +1014,6 @@ fabric_ports_t topo_manager::get_fabric_ports() {
     auto& rank_info = ze_rank_info_vec[comm->get_rank()];
     if (rank_info.subdev_count >= 2) {
         use_all_ports = true;
-    }
-
-    // enable use_all_ports if executed only for single tiles of all GPUs
-    // If all local_proc_idx values are either odd or even,
-    // then we are executed only on one tile per GPU,
-    // skip single process case
-    if (comm_size > 1 && !use_all_ports) {
-        bool only_one_tile = true;
-        int parity = rank_info_vec[0].local_proc_idx % 2;
-        for (const auto& info : rank_info_vec) {
-            if ((info.local_proc_idx % 2) != parity) {
-                only_one_tile = false;
-                break;
-            }
-        }
-        if (only_one_tile) {
-            use_all_ports = true;
-        }
     }
 
     LOG_DEBUG("use all fabric ports: ", use_all_ports);
@@ -1580,16 +1557,16 @@ void topo_manager::ze_base_init(const std::shared_ptr<ccl::device>& device,
 
     ze_rank_info.device_uuid = dev_props.uuid;
 
-#ifdef ZE_PCI_PROPERTIES_EXT_NAME
-    ze_pci_ext_properties_t pci_prop = ccl::ze::default_pci_property;
-    ze_result_t ret = zeDevicePciGetPropertiesExt(ze_device, &pci_prop);
-    if (ret == ZE_RESULT_SUCCESS) {
-        ze_rank_info.pci_addr = pci_prop.address;
-    }
-    else {
+    zes_pci_properties_t pci_props = {};
+
+    // ZE_CALL(zesDevicePciGetProperties, ((zes_device_handle_t)ze_device, &pci_props));
+    if (zesDevicePciGetProperties((zes_device_handle_t)ze_device, &pci_props) !=
+        ZE_RESULT_SUCCESS) {
         LOG_INFO("can not retrieve ze pci properties");
     }
-#endif // ZE_PCI_PROPERTIES_EXT_NAME
+    else {
+        ze_rank_info.pci_addr = pci_props.address;
+    }
 
     ZE_CALL(zeDeviceGetSubDevices, (ze_device, &ze_rank_info.subdev_count, nullptr));
     ze_rank_info.subdev_id = dev_props.subdeviceId;

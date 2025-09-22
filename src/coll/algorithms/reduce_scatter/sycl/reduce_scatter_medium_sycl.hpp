@@ -255,20 +255,13 @@ void reduce_read_write(int *even_ranks,
     else {
         // directly write to output
         data_type *write_ptr = (data_type *)out_buffer;
-        size_t write_offset = (idx + threads_already_processed) * SIMD_COMPUTE * UNROLL_SIZE;
-        if (write_offset + SIMD_COMPUTE * UNROLL_SIZE <= recv_size) {
-            write_ptr += write_offset;
+        write_ptr += (idx + threads_already_processed) * SIMD_COMPUTE * UNROLL_SIZE;
 #pragma unroll
-            for (uint32_t i = 0; i < UNROLL_SIZE; i++) {
-                //save the all sum in the second half of the temp slot
-                block_store<data_type, SIMD_COMPUTE>(write_ptr + i * SIMD_COMPUTE,
-                                                     sum.template select<SIMD_COMPUTE, 1>(SIMD_COMPUTE * i),
-                                                     properties{ alignment<align> });
-            }
-        }
-        else {
-            for (uint32_t i = write_offset; i < recv_size; i++)
-                *(write_ptr + i) = sum[i - write_offset];
+        for (uint32_t i = 0; i < UNROLL_SIZE; i++) {
+            //save the all sum in the second half of the temp slot
+            block_store<data_type, SIMD_COMPUTE>(write_ptr + i * SIMD_COMPUTE,
+                                                 sum.template select<SIMD_COMPUTE, 1>(SIMD_COMPUTE * i),
+                                                 properties{ alignment<align> });
         }
     }
 }
@@ -400,10 +393,9 @@ public:
     ccl::event reduce_scatter(sycl::queue &queue,
                               const void *send_buf,
                               void *out_buffer,
-                              ccl::datatype dtype,
                               size_t recv_size,
-                              ccl::reduction reduction,
-                              const ccl::vector_class<ccl::event> &deps,
+                              int repetition,
+                              bool print_en,
                               bool &done) {
         sycl::event e;
         // check local alignment
@@ -415,27 +407,20 @@ public:
             (size_t)send_buf % 4 == 0 && (size_t)out_buffer % 4 == 0 && (recv_size * sizeof(data_type)) % 4 == 0;
 
         if (is_aligned)
-            e = reduce_scatter_copy<4>(queue, send_buf, out_buffer, recv_size, deps, done);
+            return reduce_scatter_copy<4>(queue, send_buf, out_buffer, recv_size, repetition, print_en, done);
         else
-            e = reduce_scatter_copy<2>(queue, send_buf, out_buffer, recv_size, deps, done);
-
-        if (reduction == ccl::reduction::avg) {
-            std::vector<sycl::event> evs;
-            evs.push_back(e);
-            e = sycl_average(queue, out_buffer, recv_size, world, dtype, evs);
-        }
-
-        return ccl::event::create_from_native(e);
+            return reduce_scatter_copy<2>(queue, send_buf, out_buffer, recv_size, repetition, print_en, done);
     }
 
 private:
     template <size_t align>
-    sycl::event reduce_scatter_copy(sycl::queue &queue,
-                                    const void *send_buf,
-                                    void *out_buffer,
-                                    size_t recv_size,
-                                    const ccl::vector_class<ccl::event> &deps,
-                                    bool &done) {
+    ccl::event reduce_scatter_copy(sycl::queue &queue,
+                                   const void *send_buf,
+                                   void *out_buffer,
+                                   size_t recv_size,
+                                   int repetition,
+                                   bool print_en,
+                                   bool &done) {
         using namespace __ESIMD_NS;
         using namespace __ESIMD_ENS;
 
@@ -457,7 +442,7 @@ private:
 
         if (recv_size / (SIMD_COMPUTE * UNROLL_SIZE) < temp_world) {
             done = false;
-            return e;
+            return ccl::event::create_from_native(e);
         }
 
         int in_place = ((char *)send_buf + rank * recv_size * sizeof(data_type) == out_buffer);
@@ -489,8 +474,6 @@ private:
 
         //printf("[%d] max_count_per_rank: %d max_threads_per_MAX_COUNT: %d max_elements_per_MAX_COUNT: %d outerloop_iter_count: %d\n",
         // temp_rank, max_count_per_rank, max_threads_per_MAX_COUNT, max_elements_per_MAX_COUNT, outerloop_iter_count);
-        std::vector<sycl::event> dep_events = get_sycl_events(deps);
-
         for (outer_iter = 0; outer_iter < outerloop_iter_count; outer_iter++) {
             uint32_t threads_needed_per_chunk __attribute__((unused));
             uint32_t total_threads_needed __attribute__((unused));
@@ -519,8 +502,7 @@ private:
 
 #if KERNEL_EXEC_MAP & 1
             // local copy half of the data to tmp buffer
-            e = queue.submit([&](sycl::handler &cgh) {
-                cgh.depends_on(dep_events);
+            queue.submit([&](sycl::handler &cgh) {
                     cgh.parallel_for<class ReduceScatterMediumKernel_local_copy<data_type, align>>(
                         sycl::nd_range<1>({ persist_threads_needed }, wg_size), [=](sycl::nd_item<1> idx2) SYCL_ESIMD_KERNEL
                         {
@@ -549,20 +531,15 @@ private:
                         });//parallel_for
             }); //submit()
             //printf("kernel0\n");
-            dep_events.clear();
-            dep_events.push_back(std::move(e));
 #endif
 #if KERNEL_EXEC_MAP & 2
             //sync all the ranks within the single GPU.
-            e = local_sync(queue, temp_rank, temp_world, SYNC_BYTE * buffer_index_kernel, 0, 0, dep_events);
+            e = local_sync(queue, temp_rank, temp_world, SYNC_BYTE * buffer_index_kernel, 0, 0);
             //printf("kernel1\n");
-            dep_events.clear();
-            dep_events.push_back(std::move(e));
 #endif
 #if KERNEL_EXEC_MAP & 4
             //local reduction kernel
             e = queue.submit([&](sycl::handler &cgh) {
-                cgh.depends_on(dep_events);
                     cgh.parallel_for<class ReduceScatterMediumKernel_reduce_read_write<data_type, align>>(
                         sycl::nd_range<1>({ persist_threads_needed }, wg_size), [=](sycl::nd_item<1> idx2) SYCL_ESIMD_KERNEL
                         {
@@ -597,15 +574,11 @@ private:
                         });//parallel_for
             }); //submit()
             //printf("kernel2\n");
-            dep_events.clear();
-            dep_events.push_back(std::move(e));
 #endif
 #if KERNEL_EXEC_MAP & 8
             //sync all the ranks here before consuming the results.
-            e = global_sync(queue, temp_rank, temp_world, SYNC_BYTE * buffer_index_kernel, 1, 1, dep_events);
+            e = global_sync(queue, temp_rank, temp_world, SYNC_BYTE * buffer_index_kernel, 1, 1);
             //printf("kernel3\n");
-            dep_events.clear();
-            dep_events.push_back(std::move(e));
 #endif
 #if KERNEL_EXEC_MAP & 16
             if (temp_world > 2 || in_place) {
@@ -616,7 +589,6 @@ private:
                     persist_local_sum_threads_needed = HW_THREAD_COUNT;
                 //local reduction kernel
                 e = queue.submit([&](sycl::handler &cgh) {
-                    cgh.depends_on(dep_events);
                     cgh.parallel_for<class ReduceScatterMediumKernel_local_all_sum<data_type, align>>(
                         sycl::nd_range<1>({ persist_local_sum_threads_needed }, wg_size), [=](sycl::nd_item<1> idx2) SYCL_ESIMD_KERNEL
                         {
@@ -644,8 +616,6 @@ private:
                         }
                         });//parallel_for
                 }); //submit()
-                dep_events.clear();
-                dep_events.push_back(std::move(e));
                 //printf("kernel4\n");
             } // end if
 #endif
@@ -655,16 +625,16 @@ private:
             buffer_index_kernel = buffer_index;
         } //for (outer_iter = 0; outer_iter < outerloop_iter_count; outer_iter++)
 
-        e = dep_events.back();
-        return e;
+        return ccl::event::create_from_native(e);
     }
 
-    sycl::event reduce_scatter_nocopy(sycl::queue &queue,
-                                      const void *send_buf,
-                                      void *out_buffer,
-                                      size_t recv_size,
-                                      const ccl::vector_class<ccl::event> &deps,
-                                      bool &done) {
+    ccl::event reduce_scatter_nocopy(sycl::queue &queue,
+                                     const void *send_buf,
+                                     void *out_buffer,
+                                     size_t recv_size,
+                                     int repetition,
+                                     bool print_en,
+                                     bool &done) {
         using namespace __ESIMD_NS;
         using namespace __ESIMD_ENS;
 
@@ -686,7 +656,7 @@ private:
 
         if (recv_size / (SIMD_COMPUTE * UNROLL_SIZE) < temp_world) {
             done = false;
-            return e;
+            return ccl::event::create_from_native(e);
         }
 #if 0
 	if (recv_size > max_count_per_rank) {
@@ -738,12 +708,8 @@ private:
                                     NULL,
                                     NULL);
 
-        std::vector<sycl::event> dep_events = get_sycl_events(deps);
-
         //must sync tiles in the single GPU.
-        e = local_sync(queue, temp_rank, temp_world, SYNC_BYTE * buffer_index_kernel, 0, 0, dep_events);
-        dep_events.clear();
-        dep_events.push_back(std::move(e));
+        e = local_sync(queue, temp_rank, temp_world, SYNC_BYTE * buffer_index_kernel, 0, 0);
 
         //printf("[%d] max_count_per_rank: %d max_threads_per_MAX_COUNT: %d max_elements_per_MAX_COUNT: %d outerloop_iter_count: %d\n",
         //temp_rank, max_count_per_rank, max_threads_per_MAX_COUNT, max_elements_per_MAX_COUNT, outerloop_iter_count);
@@ -772,7 +738,6 @@ private:
 
             //local reduction kernel
             e = queue.submit([&](sycl::handler &cgh) {
-                cgh.depends_on(dep_events);
                     cgh.parallel_for<class ReduceScatterMediumKernel_nocopy_reduce_read_write<data_type>>(
                         sycl::nd_range<1>({ persist_threads_needed }, wg_size), [=](sycl::nd_item<1> idx2) SYCL_ESIMD_KERNEL
                         {
@@ -912,13 +877,9 @@ private:
                         });//parallel_for
             }); //submit()
             //printf("kernel2\n");
-            dep_events.clear();
-            dep_events.push_back(std::move(e));
 
             //sync all the ranks here before consuming the results.
-            e = global_sync(queue, temp_rank, temp_world, SYNC_BYTE * buffer_index_kernel, 1, 1, dep_events);
-            dep_events.clear();
-            dep_events.push_back(std::move(e));
+            e = global_sync(queue, temp_rank, temp_world, SYNC_BYTE * buffer_index_kernel, 1, 1);
             //printf("kernel3\n");
 
             if (temp_world > 2) {
@@ -929,7 +890,6 @@ private:
                     persist_local_sum_threads_needed = HW_THREAD_COUNT;
                 //local reduction kernel
                 e = queue.submit([&](sycl::handler &cgh) {
-                    cgh.depends_on(dep_events);
                     cgh.parallel_for<class ReduceScatterMediumKernel_nocopy_local_all_sum<data_type>>(
                         sycl::nd_range<1>({ persist_local_sum_threads_needed }, wg_size), [=](sycl::nd_item<1> idx2) SYCL_ESIMD_KERNEL
                         {
@@ -1050,8 +1010,6 @@ private:
                         }
                         });//parallel_for
                 }); //submit()
-                dep_events.clear();
-                dep_events.push_back(std::move(e));
                 //printf("kernel4\n");
             } // end if
 
@@ -1061,8 +1019,7 @@ private:
             buffer_index_kernel = buffer_index;
         } //for (outer_iter = 0; outer_iter < outerloop_iter_count; outer_iter++)
 
-        e = dep_events.back();
-        return e;
+        return ccl::event::create_from_native(e);
     }
 
     //sync all the ranks here before consuming the results.
@@ -1072,8 +1029,7 @@ private:
                             uint32_t temp_world,
                             int offset,
                             int index,
-                            int reset,
-                            const ccl::vector_class<sycl::event> &dep_events) {
+                            int reset) {
         using namespace __ESIMD_NS;
         using namespace __ESIMD_ENS;
 
@@ -1085,7 +1041,6 @@ private:
         uint32_t total_threads_needed_sync = 1;
         int wg_size = 1;
         e = queue.submit([&](sycl::handler &cgh) {
-            cgh.depends_on(dep_events);
             cgh.parallel_for<class ReduceScatterMediumKernel_GlobalSync<data_type>>(
                 sycl::nd_range<1>({ total_threads_needed_sync }, wg_size), [=](sycl::nd_item<1> idx) SYCL_ESIMD_KERNEL
                 {
@@ -1156,8 +1111,7 @@ private:
                            uint32_t temp_world,
                            int offset,
                            int index,
-                           int reset,
-                           const ccl::vector_class<sycl::event> &dep_events) {
+                           int reset) {
         using namespace __ESIMD_NS;
         using namespace __ESIMD_ENS;
 
@@ -1170,7 +1124,6 @@ private:
         int wg_size = 1;
 
         e = queue.submit([&](sycl::handler &cgh) {
-            cgh.depends_on(dep_events);
             cgh.parallel_for<class ReduceScatterMediumKernel_LocalSync<data_type>>(
                 sycl::nd_range<1>({ total_threads_needed_sync }, wg_size), [=](sycl::nd_item<1> idx) SYCL_ESIMD_KERNEL
                 {
@@ -1281,9 +1234,6 @@ private:
                                                 const void *send_buf, \
                                                 void *recv_buf, \
                                                 size_t recv_count, \
-                                                ccl::reductuin reduction, \
-                                                const ccl::vector_class<ccl::event> &deps, \
                                                 bool &done) { \
-        return rs_medium_##TYPE.reduce_scatter( \
-            queue, send_buf, recv_buf, dtype, recv_count, reduction, deps, done); \
+        return rs_medium_##TYPE.reduce_scatter(queue, send_buf, recv_buf, recv_count, done); \
     }

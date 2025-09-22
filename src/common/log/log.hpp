@@ -137,12 +137,6 @@ public:
 
     static CCL_API ccl_log_level get_log_level() noexcept;
 
-    static void set_global_idx(int idx) {
-        global_idx = idx;
-    }
-
-    static CCL_API int get_global_idx() noexcept;
-
     static CCL_API ccl_logger& get_instance();
 
     static bool is_root();
@@ -216,8 +210,6 @@ public:
 private:
     static ccl_log_level level;
     static bool abort_on_throw;
-
-    static int global_idx;
 
     ccl_streambuf streambuf;
     std::ostream out_stream;
@@ -302,21 +294,6 @@ private:
             ccl_logger::get_instance().info("|CCL_INFO| ", ##__VA_ARGS__); \
         } \
     }
-
-#if defined(CCL_ENABLE_PROFILING)
-#define LOG_INFO_PROFILED(...) \
-    { \
-        if (is_profile_mode && ccl::global_data::env().enable_profiling) { \
-            ccl_logger::get_instance().info("|Profiling_env| ", ##__VA_ARGS__); \
-        } \
-        else if (!is_profile_mode) { \
-            LOG_INFO(__VA_ARGS__); \
-        } \
-    }
-#else
-#define LOG_INFO_PROFILED(...) \
-    { LOG_INFO(__VA_ARGS__); }
-#endif
 
 // Only output log info on root
 #define LOG_INFO_ROOT(...) \

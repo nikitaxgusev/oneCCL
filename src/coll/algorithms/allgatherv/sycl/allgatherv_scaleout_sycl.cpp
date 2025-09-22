@@ -18,7 +18,6 @@
 
 #if defined(CCL_ENABLE_ZE) || defined(CCL_ENABLE_SYCL)
 #include "coll/algorithms/allgatherv/sycl/allgatherv_sycl.hpp"
-#include "coll/algorithms/allgatherv/sycl/allgatherv_ring.hpp"
 #endif // defined(CCL_ENABLE_ZE) || defined(CCL_ENABLE_SYCL)
 
 ccl::event allgatherv_scaleout_sycl_direct(sycl::queue& q,
@@ -73,47 +72,9 @@ ccl::event allgatherv_scaleout_sycl_direct(sycl::queue& q,
         sycl_deps.push_back(ev);
     }
     else if (!is_cpu_buffers) {
-        auto lib_attr = atl_mpi_ctx::get_lib_attr();
-        if (lib_attr.type == atl_mpi_ctx::ATL_MPI_LIB_IMPI && lib_attr.hmem == 1) {
-            const char* env_val = getenv("I_MPI_OFFLOAD");
-            int offload = 0;
-            if (env_val != nullptr)
-                offload = atoi(env_val);
-
-            if (offload == 0) {
-                LOG_INFO("copy_to_host=false with a GPU buffer. "
-                         "make sure I_MPI_OFFLOAD is set or GPU RDMA is enabled");
-                done = false;
-                ccl::event e;
-                return e;
-            }
-        }
-        else if (lib_attr.type == atl_mpi_ctx::ATL_MPI_LIB_MPICH && lib_attr.hmem == 1) {
-            const char* env_val = getenv("MPIR_CVAR_CH4_OFI_ENABLE_HMEM");
-            int gpu_rdma = 0;
-            if (env_val != nullptr)
-                gpu_rdma = atoi(env_val);
-
-            env_val = getenv("MPIR_CVAR_CH4_OFI_ENABLE_GPU_PIPELINE");
-            int gpu_pipeline = 0;
-            if (env_val != nullptr)
-                gpu_pipeline = atoi(env_val);
-
-            if (!gpu_rdma && !gpu_pipeline) {
-                LOG_INFO(
-                    "copy_to_host=false with a GPU buffer. "
-                    "make sure MPIR_CVAR_CH4_OFI_ENABLE_HMEM or MPIR_CVAR_CH4_OFI_ENABLE_GPU_PIPELINE are set or GPU RDMA is enabled");
-                done = false;
-                ccl::event e;
-                return e;
-            }
-        }
-        else {
+        if (!check_mpi_supports_rdma()) {
             LOG_INFO("copy_to_host=false with a GPU buffer. "
-                     "no transport with GPU RDMA enabled was detected");
-            done = false;
-            ccl::event e;
-            return e;
+                     "make sure MPI GPU RDMA is enabled");
         }
     }
 
@@ -164,32 +125,14 @@ ccl::event allgatherv_scaleout_sycl(sycl::queue& q,
                                     const ccl::vector_class<ccl::event>& deps,
                                     bool original_deps,
                                     bool& done,
-                                    sycl_allgatherv_tune_attr tune_attr,
+                                    bool direct,
                                     bool is_cpu_buffers) {
-    // TODO: add ITT/Profiling support calls
-    switch (tune_attr.algo) {
-        case allgatherv_scaleout_algo::direct: {
-            bool copy_to_host = ccl::global_data::env().sycl_enable_direct_gpu_rdma ? false : true;
-            ze_device_handle_t ze_dev = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(q.get_device());
-            if (should_disable_rdma(ze_dev)) {
-                copy_to_host = true;
-            }
-            return allgatherv_scaleout_sycl_direct(q,
-                                                   send_buf,
-                                                   send_count,
-                                                   recv_buf,
-                                                   recv_counts,
-                                                   dtype,
-                                                   comm,
-                                                   deps,
-                                                   done,
-                                                   copy_to_host,
-                                                   is_cpu_buffers);
-        }
-        case allgatherv_scaleout_algo::ring: {
-            auto ev = allgatherv_scaleout_sycl_ring(
-                q, send_buf, send_count, recv_buf, recv_counts, dtype, comm, deps, original_deps, tune_attr, done);
-            return ccl::event::create_from_native(ev);
-        }
+    bool copy_to_host = ccl::global_data::env().sycl_enable_direct_gpu_rdma ? false : true;
+    ze_device_handle_t ze_dev = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(q.get_device());
+    if (should_disable_rdma(ze_dev)) {
+        copy_to_host = true;
     }
+
+    return allgatherv_scaleout_sycl_direct(
+        q, send_buf, send_count, recv_buf, recv_counts, dtype, comm, deps, done, copy_to_host, is_cpu_buffers);
 }

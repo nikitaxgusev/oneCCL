@@ -247,8 +247,6 @@ public:
              const ipc_get_handle_desc& ipc_info,
              value_t* out_value);
 
-    void evict(void* ptr);
-
 private:
     using key_t = void*;
     std::unordered_multimap<key_t, value_t> cache;
@@ -369,10 +367,6 @@ public:
               size_t bytes,
               size_t alignment,
               void* ptr);
-
-    void evict(void* ptr) {
-        ipc_handles.evict(ptr);
-    }
 
 private:
     const size_t instance_count;

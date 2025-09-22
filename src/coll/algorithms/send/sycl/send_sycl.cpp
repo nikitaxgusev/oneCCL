@@ -66,6 +66,14 @@ static ccl::event send_sycl_single_node(sycl::queue& q,
         return ccl::event::create_from_native(ack_event);
     }
 
+    // for ARC GPUs to do ring LL256
+    if (is_arc_card(ccl::ze::get_device_family(global_stream->get_ze_device())) &&
+        !group_impl::is_group_active) {
+        ccl::event e =
+            send_ll(send_buf, send_count, dtype, peer_rank, comm, global_stream, deps, done);
+        return e;
+    }
+
     std::vector<ze_handle_exchange_entry::mem_desc_t> buffer{ { const_cast<void*>(send_buf),
                                                                 ccl::ze::ipc_mem_type::memory } };
 
@@ -152,77 +160,6 @@ static ccl::event send_sycl_single_node(sycl::queue& q,
     return ret_evt;
 }
 
-static ccl::event send_mt_sycl_single_node(sycl::queue& q,
-                                           const void* send_buf,
-                                           size_t send_count,
-                                           ccl::datatype dtype,
-                                           int peer_rank,
-                                           ccl_comm* comm,
-                                           ccl_stream* global_stream,
-                                           const pt2pt_attr& /*attr*/,
-                                           const std::vector<ccl::event>& deps,
-                                           bool& done) {
-    done = false;
-    auto node_comm = comm->get_node_comm();
-    auto& g_shared_res = *ccl::global_data::get().shared_data;
-
-    // get the operation ID from the shared handshake
-    int op_id = g_shared_res.get_shared_op_id(comm->global_current_id, true);
-
-    // Wait for the host handshake that "recv_published" is set
-    {
-        auto& handshake = g_shared_res.handshakes[op_id];
-        std::unique_lock<std::mutex> lk(handshake.m);
-        while (!handshake.recv_published) {
-            handshake.cv.wait(lk);
-        }
-        handshake.recv_published = false;
-    }
-
-    // publish local pointer if needed
-    g_shared_res.do_ipc_exchangeExt(comm,
-                                    g_shared_res.hash_table,
-                                    global_stream,
-                                    { const_cast<void*>(send_buf) },
-                                    comm->global_current_id,
-                                    true /* is_pt2pt */
-    );
-
-    // Wait for the "receiver_ready_event" from the global map
-    sycl::event recv_ready_event = g_shared_res.get_receiver_ready_event(op_id);
-
-    // Now we safely get the receiver pointer
-    using arr_t = std::array<char*, 1>;
-    arr_t remote_ptrs = g_shared_res.get_ipc_ptrsExt<char, 1>(node_comm,
-                                                              g_shared_res.hash_table,
-                                                              /*comm_index=*/0,
-                                                              /*handle_index=*/0,
-                                                              const_cast<void*>(send_buf),
-                                                              comm->global_current_id);
-
-    char* peer_recv_ptr = remote_ptrs[peer_rank];
-
-    // do device memcpy, depending on the receiver’s event
-    auto sycl_deps = get_sycl_events(deps);
-    sycl_deps.push_back(recv_ready_event);
-    size_t bytes = ccl::get_datatype_size(dtype) * send_count;
-    sycl::event copy_event = q.memcpy(peer_recv_ptr, send_buf, bytes, sycl_deps);
-
-    // store that event for the receiver
-    g_shared_res.copy_event = copy_event;
-
-    // signal "copy_done" if the receiver is waiting host-side
-    {
-        auto& handshake = g_shared_res.handshakes[op_id];
-        std::lock_guard<std::mutex> lk(handshake.m);
-        handshake.copy_done = true;
-        handshake.cv.notify_one();
-    }
-
-    done = true;
-    return ccl::event::create_from_native(copy_event);
-}
-
 ccl::event send_sycl(sycl::queue& q,
                      const void* send_buf,
                      size_t send_count,
@@ -246,15 +183,14 @@ ccl::event send_sycl(sycl::queue& q,
         ccl::global_data::env().sycl_pt2pt_read = 1;
     }
 
+    if (is_arc_card(ccl::ze::get_device_family(global_stream->get_ze_device()))) {
+        LOG_DEBUG("recv_sycl: write mode enabled: ARC card detected");
+        ccl::global_data::env().sycl_pt2pt_read = 0;
+    }
+
     if (is_single_node) {
-        if (comm->is_multi_thread_instance() == true) {
-            return send_mt_sycl_single_node(
-                q, send_buf, send_count, dtype, peer_rank, comm, global_stream, attr, deps, done);
-        }
-        else {
-            return send_sycl_single_node(
-                q, send_buf, send_count, dtype, peer_rank, comm, global_stream, attr, deps, done);
-        }
+        return send_sycl_single_node(
+            q, send_buf, send_count, dtype, peer_rank, comm, global_stream, attr, deps, done);
     }
     else {
         done = false;

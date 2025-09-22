@@ -79,9 +79,7 @@ std::string to_string(const domains_t& domains);
 #if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE)
 struct topo_ze_rank_info {
     ze_device_uuid_t device_uuid{};
-#ifdef ZE_PCI_PROPERTIES_EXT_NAME
-    ze_pci_address_ext_t pci_addr{};
-#endif // ZE_PCI_PROPERTIES_EXT_NAME
+    zes_pci_address_t pci_addr{};
     uint32_t subdev_count{};
     uint32_t subdev_id{};
     ze_device_property_flags_t dev_prop_flags{};

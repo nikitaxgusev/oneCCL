@@ -66,7 +66,6 @@ API_FORCE_INSTANTIATION(comm_attr,
                         comm_attr_id::version,
                         ccl::library_version,
                         detail::ccl_api_type_attr_traits)
-API_FORCE_INSTANTIATION(comm_attr, comm_attr_id::blocking, int, detail::ccl_api_type_attr_traits)
 
 #undef API_FORCE_INSTANTIATION
 

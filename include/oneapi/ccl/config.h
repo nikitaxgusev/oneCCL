@@ -31,11 +31,11 @@
 #define ONECCL_SPEC_VERSION "1.0"
 
 #define CCL_MAJOR_VERSION           2021
-#define CCL_MINOR_VERSION           16
-#define CCL_UPDATE_VERSION          1
+#define CCL_MINOR_VERSION           15
+#define CCL_UPDATE_VERSION          5
 #define CCL_PRODUCT_STATUS     "Gold"
-#define CCL_PRODUCT_BUILD_DATE "2025-08-21T 09:10:01Z"
-#define CCL_PRODUCT_FULL       "Gold-2021.16.1 2025-08-21T 09:10:01Z (master/b5a4144)"
+#define CCL_PRODUCT_BUILD_DATE "2025-09-22T 02:25:11Z"
+#define CCL_PRODUCT_FULL       "Gold-2021.15.5 2025-09-22T 02:25:11Z (master/ca1d314)"
 
 #if defined(SYCL_LANGUAGE_VERSION) && defined (__INTEL_LLVM_COMPILER)
 #define CCL_ENABLE_SYCL

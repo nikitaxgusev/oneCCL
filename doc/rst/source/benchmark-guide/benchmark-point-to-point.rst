@@ -13,42 +13,42 @@ The benchmark is distributed with the oneCCL package. You can find it in the exa
 Build oneCCL Benchmark
 ***********************
 
+CPU-Only
+^^^^^^^^^
+
 To build the benchmark, complete the following steps:
 
-.. tab-set::
+1. Configure your environment. Source the installed oneCCL library for the CPU-only support:
 
-    .. tab-item:: CPU-Only
-       
-      #. Configure your environment. Source the installed oneCCL library for the CPU-only support:
+   .. code::
 
-         .. code::
+      source <oneCCL install dir>/ccl/latest/env/vars.sh --ccl-configuration=cpu
 
-            source <oneCCL install dir>/ccl/latest/env/vars.sh --ccl-configuration=cpu
+2. Navigate to ``<oneCCL install dir>/share/doc/ccl/examples``
+3. Build the benchmark using the following command:
 
-      #. Navigate to ``<oneCCL install dir>/share/doc/ccl/examples``
-      #. Build the benchmark using the following command:
+   .. code::
 
-         .. code::
+      cmake -S . -B build -DCMAKE_INSTALL_PREFIX=$(pwd)/build/_install && cmake --build build -j $(nproc) -t install
 
-            cmake -S . -B build -DCMAKE_INSTALL_PREFIX=$(pwd)/build/_install && cmake --build build -j $(nproc) -t install
+CPU-GPU
+^^^^^^^^
 
-    .. tab-item:: CPU-GPU
-       
-      #. Configure your environment.
+1. Configure your environment.
 
-         * Source the Intel(R) oneAPI DPC++/C++ Compiler. See the `documentation <https://www.intel.com/content/www/us/en/docs/dpcpp-cpp-compiler/get-started-guide/2024-2/overview.html>`_ for the instructions.
-         * Source the installed oneCCL library for the CPU-GPU support:
+   * Source the Intel(R) oneAPI DPC++/C++ Compiler. See the `documentation <https://www.intel.com/content/www/us/en/docs/dpcpp-cpp-compiler/get-started-guide/2024-2/overview.html>`_ for the instructions.
+   * Source the installed oneCCL library for the CPU-GPU support:
 
-           .. code::
-          
-              source <oneCCL install dir>/ccl/latest/env/vars.sh --ccl-configuration=cpu_gpu_dpcpp
+     .. code::
 
-      #. Navigate to ``<oneCCL install dir>/share/doc/ccl/examples``.
-      #. Build the SYCL benchmark with the following command:
+        source <oneCCL install dir>/ccl/latest/env/vars.sh --ccl-configuration=cpu_gpu_dpcpp
 
-         .. code::
+2. Navigate to ``<oneCCL install dir>/share/doc/ccl/examples``.
+3. Build the SYCL benchmark with the following command:
 
-           cmake -S . -B build -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx -DCOMPUTE_BACKEND=dpcpp -DCMAKE_INSTALL_PREFIX=$(pwd)/build/_install && cmake --build build -j $(nproc) -t install
+   .. code::
+
+      cmake -S . -B build -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx -DCOMPUTE_BACKEND=dpcpp -DCMAKE_INSTALL_PREFIX=$(pwd)/build/_install && cmake --build build -j $(nproc) -t install
 
 
 Run oneCCL Point-to-Point Benchmark
@@ -135,44 +135,42 @@ Point-to-Point Benchmark Arguments
 Examples
 ********
 
-.. tab-set::
+GPU
+^^^^
 
-   .. tab-item:: GPU
+The following example shows how to run ``ccl_latency`` with the GPU buffers:
 
-      The following example shows how to run ``ccl_latency`` with the GPU buffers:
+.. code::
 
-      .. code::
-
-         mpirun -n 2 -ppn <P> ccl_latency -b gpu -i 20 -f 1024 -t 67108864 -e 1 
-         mpirun -n 2 -ppn <P> ccl_bw -b gpu -i 20 -f 1024 -t 67108864 -e 1 
-
-
-      The commands above: 
-
-      * Run the ``ccl_latency`` or the ``ccl_bw`` benchmark  
-      * Contain a total of two processes (this benchmark only supports two processes) 
-      * Use P processes per node, where P can be ``1`` if running on two different nodes or ``2`` when running on a single node
-      * Use GPU buffers 
-      * Use 20 iterations 
-      * Use element count from ``1024`` to ``67108864`` (``ccl_latency`` or ``ccl_bw`` will run with the powers of two in that range) 
-      * Have in-order queue 
+   mpirun -n 2 -ppn <P> ccl_latency -b gpu -i 20 -f 1024 -t 67108864 -e 1 
+   mpirun -n 2 -ppn <P> ccl_bw -b gpu -i 20 -f 1024 -t 67108864 -e 1 
 
 
-   .. tab-item:: CPU
-      
-      The following example shows how to run ``ccl_latency`` with the CPU buffers:
+The above commands: 
 
-      .. code::
+* Run the ``ccl_latency`` or the ``ccl_bw`` benchmark  
+* Contain a total of two processes (this benchmark only supports two processes) 
+* Use P processes per node, where P can be ``1`` if running on two different nodes or ``2`` when running on a single node
+* Use GPU buffers 
+* Use 20 iterations 
+* Use element count from ``1024`` to ``67108864`` (``ccl_latency`` or ``ccl_bw`` will run with the powers of two in that range) 
+* Have in-order queue 
 
-         mpirun –n 2 -ppn <P> ccl_latency -b cpu -i 20 -f 1024 -t 67108864
-         mpirun –n 2 -ppn <P> ccl_bw -b cpu -i 20 -f 1024 -t 67108864   
 
-      The commands above: 
+CPU
+^^^^
 
-      * Run the ``ccl_latency/ccl_bw`` benchmark  
-      * Contain a total of two processes (this benchmark only supports two processes) 
-      * Contain P processes per node, where ``P`` can be ``1`` if running on two different nodes or ``2`` when running on a single node
-      * Use CPU buffers 
-      * Use 20 iterations 
-      * Use element count from ``1024`` to ``67108864`` (``ccl_latency`` will run with the power of two in that range) 
+.. code::
+
+   mpirun –n 2 -ppn <P> ccl_latency -b cpu -i 20 -f 1024 -t 67108864
+  | mpirun –n 2 -ppn <P> ccl_bw -b cpu -i 20 -f 1024 -t 67108864   
+
+The preceding command: 
+
+* Runs the ``ccl_latency/ccl_bw`` benchmark  
+* Contains a total of two processes (this benchmark only supports two processes) 
+* Contains P processes per node, where ``P`` can be ``1`` if running on two different nodes or ``2`` when running on a single node
+* Uses CPU buffers 
+* Uses 20 iterations 
+* Uses element count from ``1024`` to ``67108864`` (``ccl_latency`` will run with the power of two in that range) 
 

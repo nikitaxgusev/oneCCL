@@ -37,6 +37,19 @@
 #include "common/utils/sycl_utils.hpp"
 #endif // CCL_ENABLE_SYCL
 
+namespace ccl {
+namespace v1 {
+
+struct impl_dispatch {
+    template <class Object>
+    const typename Object::impl_value_t& operator()(const Object& obj) {
+        return obj.get_impl();
+    }
+};
+
+}; // namespace v1
+}; // namespace ccl
+
 // ccl_comm_env
 
 ccl_comm_env::ccl_comm_env(std::shared_ptr<ccl::device> device) : device(device) {
@@ -160,6 +173,19 @@ void ccl_comm::init(int comm_id,
     if (comm_rank == 0) {
         LOG_DEBUG(to_string_ext());
     }
+
+#if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE)
+    for (int i = 0; i < ARC_MAX_NUM + 1; i++)
+        pattern_counter[i] = 0xa770;
+
+    if (device_ptr != NULL) {
+        sycl::queue q(device_ptr->get_native());
+        ccl::stream op_stream = ccl::create_stream(q);
+        ccl::impl_dispatch disp;
+        ccl_stream* cclstream = get_stream_ptr(disp(op_stream));
+        coll_init(this, cclstream);
+    }
+#endif
 }
 
 ccl_comm::ccl_comm(int comm_id,
@@ -203,18 +229,13 @@ ccl_comm::ccl_comm(device_t device,
     }
 }
 
-ccl_comm::ccl_comm(int size,
-                   int rank,
-                   ccl::shared_ptr_class<ikvs_wrapper> kvs,
-                   ccl::ccl_comm_attr_impl& attr)
-        : ccl_comm(atl_comm_manager::create(size, { rank }, std::move(kvs), attr)) {}
+ccl_comm::ccl_comm(int size, int rank, ccl::shared_ptr_class<ikvs_wrapper> kvs)
+        : ccl_comm(atl_comm_manager::create(size, { rank }, std::move(kvs))) {}
 
-ccl_comm::ccl_comm(int size, ccl::shared_ptr_class<ikvs_wrapper> kvs, ccl::ccl_comm_attr_impl& attr)
-        : ccl_comm(atl_comm_manager::create(size, { 0 }, std::move(kvs), attr)) {}
+ccl_comm::ccl_comm(int size, ccl::shared_ptr_class<ikvs_wrapper> kvs)
+        : ccl_comm(atl_comm_manager::create(size, { 0 }, std::move(kvs))) {}
 
 ccl_comm::ccl_comm() : ccl_comm(atl_comm_manager::create()) {}
-
-ccl_comm::ccl_comm(ccl::ccl_comm_attr_impl& attr) : ccl_comm(atl_comm_manager::create(attr)) {}
 
 ccl_comm::ccl_comm(const ccl_comm& src, int comm_id)
         : ccl_comm(comm_id, src.get_atl_comm(), true, true) {
@@ -242,23 +263,17 @@ ccl_comm* ccl_comm::create(device_t device,
                            context_t context,
                            int size,
                            int rank,
-                           ccl::shared_ptr_class<ccl::kvs_interface> kvs,
-                           ccl::ccl_comm_attr_impl& attr) {
+                           ccl::shared_ptr_class<ccl::kvs_interface> kvs) {
     return new ccl_comm(
-        device, context, atl_comm_manager::create(size, { rank }, get_kvs_wrapper(kvs), attr));
+        device, context, atl_comm_manager::create(size, { rank }, get_kvs_wrapper(kvs)));
 }
 
-ccl_comm* ccl_comm::create(int size,
-                           int rank,
-                           ccl::shared_ptr_class<ccl::kvs_interface> kvs,
-                           ccl::ccl_comm_attr_impl& attr) {
-    return new ccl_comm(size, rank, get_kvs_wrapper(kvs), attr);
+ccl_comm* ccl_comm::create(int size, int rank, ccl::shared_ptr_class<ccl::kvs_interface> kvs) {
+    return new ccl_comm(size, rank, get_kvs_wrapper(kvs));
 }
 
-ccl_comm* ccl_comm::create(int size,
-                           ccl::shared_ptr_class<ccl::kvs_interface> kvs,
-                           ccl::ccl_comm_attr_impl& attr) {
-    return new ccl_comm(size, get_kvs_wrapper(kvs), attr);
+ccl_comm* ccl_comm::create(int size, ccl::shared_ptr_class<ccl::kvs_interface> kvs) {
+    return new ccl_comm(size, get_kvs_wrapper(kvs));
 }
 
 void ccl_comm::create_topo_subcomms(std::shared_ptr<atl_base_comm> atl_comm) {
@@ -320,8 +335,7 @@ void ccl_comm::allocate_resources() {
     if (ccl::global_data::env().enable_unordered_coll) {
         comm_impl->unordered_coll_manager.reset(new ccl_unordered_coll_manager(*this));
     }
-    ccl::global_data::env().print(rank(), true, enable_multi_thread_instance);
-    ccl::global_data::env().print(rank(), false, enable_multi_thread_instance);
+    ccl::global_data::env().print(rank(), enable_multi_thread_instance);
 }
 
 ccl::comm_interface_ptr ccl_comm::split(int color, int key, bool split_external_use) {

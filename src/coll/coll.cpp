@@ -66,8 +66,6 @@
 #include "atl/mpi/atl_mpi.hpp"
 #include "common/api_wrapper/mpi_api_wrapper.hpp"
 
-#include "common/utils/comm_profile.hpp"
-
 #if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE)
 #include "coll/algorithms/utils/sycl_selection.hpp"
 #include "coll/algorithms/allreduce/sycl/allreduce_sycl.hpp"
@@ -78,19 +76,6 @@
 #include "coll/algorithms/recv/sycl/recv_sycl.hpp"
 #include "coll/algorithms/send/sycl/send_sycl.hpp"
 #endif // CCL_ENABLE_SYCL && CCL_ENABLE_ZE
-
-#if defined(CCL_ENABLE_SYCL)
-#define CCL_THROW_RECORDING(stream, ...) \
-    do { \
-        if (use_recording_path((stream))) { \
-            CCL_THROW(__VA_ARGS__); \
-        } \
-    } while (0)
-#else
-#define CCL_THROW_RECORDING(stream, ...) \
-    do { \
-    } while (0)
-#endif
 
 #if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE)
 ccl_request* exec_single_rank_inplace_coll(const ccl_coll_param& param) {
@@ -274,24 +259,24 @@ static ccl_request* ccl_coll_create(ccl_coll_param& param, const ccl_coll_attr& 
         attr.to_cache = 0;
     }
 
+    // r2r_comm.size() == 1 means single node
     if (ccl::global_data::env().atl_transport == ccl_atl_mpi &&
-        ccl_is_direct_algo(selector_param) && param.comm->get_atl_comm()->attr.in.enable_sync_coll
+        ccl_is_direct_algo(selector_param) && ccl::global_data::env().enable_sync_coll
 #ifdef CCL_ENABLE_SYCL
         && !attr.is_sycl_buf && !checkers::is_device_buf(selector_param)
 #endif // CCL_ENABLE_SYCL
     ) {
 #if defined(CCL_ENABLE_MPI) && defined(CCL_ENABLE_OMP)
-        // invoke allreduce with openmp threads, requires I_MPI_THREAD_RUNTIME=openmp
-        // r2r_comm.size() == 1 means single node
-        if (ccl::openmp_lib_ops.thread_num != nullptr &&
+        // invoke allreduce with openmp threads
+        if (param.ctype == ccl_coll_allreduce && ccl::openmp_lib_ops.allreduce != nullptr &&
+            ccl::openmp_lib_ops.thread_num != nullptr &&
             param.comm->get_r2r_comm().get()->size() == 1 &&
             atl_mpi_ctx::get_lib_attr().type == atl_mpi_ctx::ATL_MPI_LIB_IMPI &&
             atl_mpi_ctx::get_lib_attr().version_value >= 2021 &&
             atl_mpi_ctx::get_lib_attr().sub_version_value >= 15 &&
-            ccl::global_data::env().enable_omp_coll && ccl::openmp_lib_ops.thread_num() > 0) {
-            if (param.ctype == ccl_coll_allreduce && ccl::openmp_lib_ops.allreduce != nullptr &&
-                ccl::global_data::env().enable_omp_allreduce) {
-                LOG_DEBUG("invoke omp allreduce");
+            ccl::global_data::env().enable_omp_allreduce) {
+            // requires I_MPI_THREAD_RUNTIME=openmp
+            if (ccl::openmp_lib_ops.thread_num() > 0) {
                 ccl::openmp_lib_ops.allreduce(param.send_bufs[0],
                                               param.recv_bufs[0],
                                               param.send_counts[0],
@@ -301,37 +286,6 @@ static ccl_request* ccl_coll_create(ccl_coll_param& param, const ccl_coll_attr& 
                                               param.comm,
                                               param.stream,
                                               param.deps);
-                // returned nullptr will be used to create an empty and completed event
-                return nullptr;
-            }
-            else if (param.ctype == ccl_coll_allgatherv &&
-                     ccl::openmp_lib_ops.allgatherv != nullptr &&
-                     ccl::global_data::env().enable_omp_allgatherv) {
-                // turn send_count and recv_count into send_len and recv_lens(in bytes)
-                size_t dtype_size = param.dtype.size();
-                int comm_size = param.comm->size();
-                size_t send_len = param.send_counts[0] * dtype_size;
-                std::vector<size_t> recv_lens(comm_size);
-                for (int i = 0; i < comm_size; i++) {
-                    recv_lens[i] = param.recv_counts[i] * dtype_size;
-                }
-                std::vector<size_t> offsets(comm_size);
-                // calculate offset
-                offsets[0] = 0;
-                for (int i = 1; i < comm_size; i++) {
-                    offsets[i] = offsets[i - 1] + param.recv_counts[i - 1] * dtype_size;
-                }
-                // openmp allgatherv will always use MPI_CHAR
-                LOG_DEBUG("invoke omp allgatherv");
-                ccl::openmp_lib_ops.allgatherv(param.send_bufs[0],
-                                               send_len,
-                                               param.recv_bufs[0],
-                                               recv_lens.data(),
-                                               offsets.data(),
-                                               attr,
-                                               param.comm,
-                                               param.stream,
-                                               param.deps);
                 // returned nullptr will be used to create an empty and completed event
                 return nullptr;
             }
@@ -1130,12 +1084,6 @@ ccl::event ccl_allgather(const void* send_buf,
                          ccl_comm* comm,
                          const ccl_stream* stream,
                          const std::vector<ccl::event>& deps) {
-#if defined(CCL_ENABLE_PROFILING)
-    comm_session comm_event_session;
-    profiler_record_comm_event_enter(
-        comm, "allgather", ccl::reduction::none, dtype, count, comm_event_session);
-#endif
-
     std::function<ccl::event()> collective =
         [send_buf, recv_buf, count, dtype, attr, comm, stream, &deps]() -> ccl::event {
         auto req = ccl_allgather_impl(send_buf, recv_buf, count, dtype, attr, comm, stream, deps);
@@ -1155,10 +1103,10 @@ ccl::event ccl_allgather(const void* send_buf,
                                                           {}, // hint_algo
                                                           false); // is_scaleout
     if (can_use_sycl_kernels(param)) {
-        if (comm->global_current_id > 0) {
-            CCL_THROW(
-                "allgather is not supported for multi-group case of multithreaded communicator yet");
+        if (comm->is_multi_thread_instance() == true) {
+            CCL_THROW("allgather is not supported for multithreaded communicator yet");
         }
+
         LOG_DEBUG(
             "|CCL_SYCL| allgather selects sycl-kernels count: ", count, ", datatype: ", dtype);
 
@@ -1204,9 +1152,6 @@ ccl::event ccl_allgather(const void* send_buf,
     else {
         event = collective();
     }
-#if defined(CCL_ENABLE_PROFILING)
-    profiler_record_comm_event_exit(comm->rank(), comm_event_session);
-#endif
     return event;
 }
 
@@ -1218,9 +1163,6 @@ ccl_request* ccl_allgather_impl(const void* send_buf,
                                 ccl_comm* comm,
                                 const ccl_stream* stream,
                                 const std::vector<ccl::event>& deps) {
-    CCL_THROW_RECORDING(stream,
-                        "|CCL_SYCL| sched algorithms do not support sycl_graph recording, "
-                        "please use sycl_algorithms");
     ccl_coll_param param = ccl_coll_param::create_allgather_param(
         send_buf, recv_buf, count, dtype, attr, comm, stream, deps);
 
@@ -1238,12 +1180,6 @@ ccl::event ccl_allgatherv(const void* send_buf,
                           ccl_comm* comm,
                           const ccl_stream* stream,
                           const std::vector<ccl::event>& deps) {
-#if defined(CCL_ENABLE_PROFILING)
-    comm_session comm_event_session;
-    profiler_record_comm_event_enter(
-        comm, "allgatherv", ccl::reduction::none, dtype, send_count, comm_event_session);
-#endif
-
     std::function<ccl::event()> collective =
         [send_buf, send_count, recv_buf, recv_counts, dtype, attr, comm, stream, &deps]()
         -> ccl::event {
@@ -1267,10 +1203,10 @@ ccl::event ccl_allgatherv(const void* send_buf,
     param.recv_counts = recv_counts.data();
 
     if (can_use_sycl_kernels(param)) {
-        if (comm->global_current_id > 0) {
-            CCL_THROW(
-                "allgatherv is not supported for multi-group case of multithreaded communicator yet");
+        if (comm->is_multi_thread_instance() == true) {
+            CCL_THROW("allgatherv is not supported for multithreaded communicator yet");
         }
+
         LOG_DEBUG("|CCL_SYCL| allgatherv selects sycl-kernels send_count: ",
                   send_count,
                   ", datatype: ",
@@ -1317,9 +1253,6 @@ ccl::event ccl_allgatherv(const void* send_buf,
     else {
         event = collective();
     }
-#if defined(CCL_ENABLE_PROFILING)
-    profiler_record_comm_event_exit(comm->rank(), comm_event_session);
-#endif
     return event;
 }
 
@@ -1332,9 +1265,6 @@ ccl_request* ccl_allgatherv_impl(const void* send_buf,
                                  ccl_comm* comm,
                                  const ccl_stream* stream,
                                  const std::vector<ccl::event>& deps) {
-    CCL_THROW_RECORDING(stream,
-                        "|CCL_SYCL| sched algorithms do not support sycl_graph recording, "
-                        "please use sycl_algorithms");
     ccl_coll_param param = ccl_coll_param::create_allgatherv_param(
         send_buf, send_count, recv_buf, recv_counts, dtype, attr, comm, stream, deps);
 
@@ -1352,12 +1282,6 @@ ccl::event ccl_allreduce(const void* send_buf,
                          ccl_comm* comm,
                          const ccl_stream* stream,
                          const std::vector<ccl::event>& deps) {
-#if defined(CCL_ENABLE_PROFILING)
-    comm_session comm_event_session;
-    profiler_record_comm_event_enter(
-        comm, "allreduce", reduction, dtype, count, comm_event_session);
-#endif
-
     std::function<ccl::event()> collective =
         [send_buf, recv_buf, count, dtype, reduction, attr, comm, stream, &deps]() -> ccl::event {
         auto req = ccl_allreduce_impl(
@@ -1378,6 +1302,15 @@ ccl::event ccl_allreduce(const void* send_buf,
                                                           {}, // hint_algo
                                                           false); // is_scaleout
     if (can_use_sycl_kernels(param)) {
+        if (comm->is_multi_thread_instance() == true && count < comm->size()) {
+            CCL_THROW("|CCL_SYCL| allreduce doesn't support count(",
+                      count,
+                      ") < comm size(",
+                      comm->size(),
+                      ") "
+                      "for multithreaded case yet");
+        }
+
         LOG_DEBUG(
             "|CCL_SYCL| allreduce selects sycl-kernels count: ", count, ", datatype: ", dtype);
 
@@ -1422,11 +1355,6 @@ ccl::event ccl_allreduce(const void* send_buf,
     else {
         event = collective();
     }
-
-#if defined(CCL_ENABLE_PROFILING)
-    profiler_record_comm_event_exit(comm->rank(), comm_event_session);
-#endif
-
     return event;
 }
 
@@ -1439,9 +1367,6 @@ ccl_request* ccl_allreduce_impl(const void* send_buf,
                                 ccl_comm* comm,
                                 const ccl_stream* stream,
                                 const std::vector<ccl::event>& deps) {
-    CCL_THROW_RECORDING(stream,
-                        "|CCL_SYCL| sched algorithms do not support sycl_graph recording, "
-                        "please use sycl_algorithms");
     ccl_coll_param param = ccl_coll_param::create_allreduce_param(
         send_buf, recv_buf, count, dtype, reduction, attr, comm, stream, deps);
 
@@ -1458,12 +1383,6 @@ ccl::event ccl_alltoall(const void* send_buf,
                         ccl_comm* comm,
                         const ccl_stream* stream,
                         const std::vector<ccl::event>& deps) {
-#if defined(CCL_ENABLE_PROFILING)
-    comm_session comm_event_session;
-    profiler_record_comm_event_enter(
-        comm, "alltoall", ccl::reduction::none, dtype, count, comm_event_session);
-#endif
-
     std::function<ccl::event()> collective =
         [send_buf, recv_buf, count, dtype, attr, comm, stream, &deps]() -> ccl::event {
         auto req = ccl_alltoall_impl(send_buf, recv_buf, count, dtype, attr, comm, stream, deps);
@@ -1484,10 +1403,6 @@ ccl::event ccl_alltoall(const void* send_buf,
                                                           false); // is_scaleout
 
     if (can_use_sycl_kernels(param)) {
-        if (comm->global_current_id > 0) {
-            CCL_THROW(
-                "alltoall is not supported for multi-group case of multithreaded communicator");
-        }
         LOG_DEBUG(
             "|CCL_SYCL| alltoall selects sycl-kernels send_count: ", count, ", datatype: ", dtype);
 
@@ -1531,9 +1446,6 @@ ccl::event ccl_alltoall(const void* send_buf,
     else {
         event = collective();
     }
-#if defined(CCL_ENABLE_PROFILING)
-    profiler_record_comm_event_exit(comm->rank(), comm_event_session);
-#endif
     return event;
 }
 
@@ -1545,9 +1457,6 @@ ccl_request* ccl_alltoall_impl(const void* send_buf,
                                ccl_comm* comm,
                                const ccl_stream* stream,
                                const std::vector<ccl::event>& deps) {
-    CCL_THROW_RECORDING(stream,
-                        "|CCL_SYCL| sched algorithms do not support sycl_graph recording, "
-                        "please use sycl_algorithms");
     ccl_coll_param param = ccl_coll_param::create_alltoall_param(
         send_buf, recv_buf, count, dtype, attr, comm, stream, deps);
 
@@ -1565,16 +1474,6 @@ ccl::event ccl_alltoallv(const void* send_buf,
                          ccl_comm* comm,
                          const ccl_stream* stream,
                          const std::vector<ccl::event>& deps) {
-#if defined(CCL_ENABLE_PROFILING)
-    comm_session comm_event_session;
-    profiler_record_comm_event_enter(comm,
-                                     "alltoallv",
-                                     ccl::reduction::none,
-                                     dtype,
-                                     send_counts[comm->rank()],
-                                     comm_event_session);
-#endif
-
     auto collective =
         [send_buf, send_counts, recv_buf, recv_counts, dtype, attr, comm, stream, &deps]()
         -> ccl::event {
@@ -1597,10 +1496,6 @@ ccl::event ccl_alltoallv(const void* send_buf,
     else {
         event = collective();
     }
-#if defined(CCL_ENABLE_PROFILING)
-    profiler_record_comm_event_exit(comm->rank(), comm_event_session);
-#endif
-
     return event;
 }
 
@@ -1613,9 +1508,6 @@ ccl_request* ccl_alltoallv_impl(const void* send_buf,
                                 ccl_comm* comm,
                                 const ccl_stream* stream,
                                 const std::vector<ccl::event>& deps) {
-    CCL_THROW_RECORDING(stream,
-                        "|CCL_SYCL| sched algorithms do not support sycl_graph recording, "
-                        "please use sycl_algorithms");
     ccl_coll_param param = ccl_coll_param::create_alltoallv_param(
         send_buf, send_counts, recv_buf, recv_counts, dtype, attr, comm, stream, deps);
 
@@ -1627,12 +1519,6 @@ ccl_request* ccl_alltoallv_impl(const void* send_buf,
 ccl::event ccl_barrier(ccl_comm* comm,
                        const ccl_stream* stream,
                        const std::vector<ccl::event>& deps) {
-#if defined(CCL_ENABLE_PROFILING)
-    comm_session comm_event_session;
-    profiler_record_comm_event_enter(
-        comm, "barrier", ccl::reduction::none, ccl::datatype::uint8, 0, comm_event_session);
-#endif
-
     auto collective = [comm, stream, &deps]() -> ccl::event {
         auto req = ccl_barrier_impl(comm, stream, deps);
         return std::unique_ptr<ccl::event_impl>(new ccl::host_event_impl(req));
@@ -1652,18 +1538,12 @@ ccl::event ccl_barrier(ccl_comm* comm,
     else {
         event = collective();
     }
-#if defined(CCL_ENABLE_PROFILING)
-    profiler_record_comm_event_exit(comm->rank(), comm_event_session);
-#endif
     return event;
 }
 
 ccl_request* ccl_barrier_impl(ccl_comm* comm,
                               const ccl_stream* stream,
                               const std::vector<ccl::event>& deps) {
-    CCL_THROW_RECORDING(stream,
-                        "|CCL_SYCL| sched algorithms do not support sycl_graph recording, "
-                        "please use sycl_algorithms");
     ccl_coll_param param = ccl_coll_param::create_barrier_param(comm, stream, deps);
 
     ccl_coll_attr attr{};
@@ -1697,56 +1577,10 @@ ccl::event ccl_broadcast(void* buf,
                          ccl_comm* comm,
                          const ccl_stream* stream,
                          const std::vector<ccl::event>& deps) {
-#if defined(CCL_ENABLE_PROFILING)
-    comm_session comm_event_session;
-    profiler_record_comm_event_enter(
-        comm, "broadcast", ccl::reduction::none, dtype, count, comm_event_session);
-#endif
-
-    std::function<ccl::event()> collective =
-        [buf, count, dtype, root, attr, comm, stream, &deps]() -> ccl::event {
+    auto collective = [buf, count, dtype, root, attr, comm, stream, &deps]() -> ccl::event {
         auto req = ccl_broadcast_impl(buf, count, dtype, root, attr, comm, stream, deps);
         return std::unique_ptr<ccl::event_impl>(new ccl::host_event_impl(req));
     };
-#if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE)
-    ccl_selector_param param = ccl_selector_param::create(ccl_coll_broadcast,
-                                                          count,
-                                                          dtype,
-                                                          comm,
-                                                          const_cast<ccl_stream*>(stream),
-                                                          buf,
-                                                          ccl::reduction::custom,
-                                                          false, // is_vector_buf
-                                                          false, // is_sycl_buf
-                                                          CCL_INVALID_PEER_RANK_IDX, // peer_rank
-                                                          {}, // hint_algo
-                                                          false); // is_scaleout
-
-    if (can_use_sycl_kernels(param)) {
-        if (comm->is_multi_thread_instance() == true) {
-            CCL_THROW("broadcast is not supported for multithreaded communicator yet");
-        }
-
-        LOG_DEBUG(
-            "|CCL_SYCL| broadcast selects sycl-kernels count: ", count, ", datatype: ", dtype);
-
-        ccl_stream* op_stream = const_cast<ccl_stream*>(stream);
-        auto q = op_stream->get_native_stream();
-        auto dummy_unused_attr = ccl::create_operation_attr<ccl::broadcast_attr>();
-        collective = [=, &q, &deps]() -> ccl::event {
-            bool done = false;
-            ccl::event ccl_event = ccl::broadcast_sycl(
-                q, buf, buf, count, dtype, root, comm, op_stream, dummy_unused_attr, deps, done);
-            if (done) {
-                if (ccl::global_data::env().enable_op_sync) {
-                    ccl_event.wait();
-                }
-                return ccl_event;
-            }
-            return collective();
-        };
-    }
-#endif // CCL_ENABLE_SYCL && CCL_ENABLE_ZE
     ccl_request* req{};
     ccl::event event = std::unique_ptr<ccl::event_impl>(
         new ccl::host_event_impl(req, group_impl::is_group_active));
@@ -1762,9 +1596,6 @@ ccl::event ccl_broadcast(void* buf,
     else {
         event = collective();
     }
-#if defined(CCL_ENABLE_PROFILING)
-    profiler_record_comm_event_exit(comm->rank(), comm_event_session);
-#endif
     return event;
 }
 
@@ -1776,9 +1607,6 @@ ccl_request* ccl_broadcast_impl(void* buf,
                                 ccl_comm* comm,
                                 const ccl_stream* stream,
                                 const std::vector<ccl::event>& deps) {
-    CCL_THROW_RECORDING(stream,
-                        "|CCL_SYCL| sched algorithms do not support sycl_graph recording, "
-                        "please use sycl_algorithms");
     ccl_coll_param param =
         ccl_coll_param::create_broadcast_param(buf, count, dtype, root, attr, comm, stream, deps);
 
@@ -1796,66 +1624,12 @@ ccl::event ccl_broadcast(void* send_buf,
                          ccl_comm* comm,
                          const ccl_stream* stream,
                          const std::vector<ccl::event>& deps) {
-#if defined(CCL_ENABLE_PROFILING)
-    comm_session comm_event_session;
-    profiler_record_comm_event_enter(
-        comm, "broadcast", ccl::reduction::none, dtype, count, comm_event_session);
-#endif
-
-    std::function<ccl::event()> collective =
+    auto collective =
         [send_buf, recv_buf, count, dtype, root, attr, comm, stream, &deps]() -> ccl::event {
         auto req =
             ccl_broadcast_impl(send_buf, recv_buf, count, dtype, root, attr, comm, stream, deps);
         return std::unique_ptr<ccl::event_impl>(new ccl::host_event_impl(req));
     };
-#if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE)
-    ccl_selector_param param = ccl_selector_param::create(ccl_coll_broadcast,
-                                                          count,
-                                                          dtype,
-                                                          comm,
-                                                          const_cast<ccl_stream*>(stream),
-                                                          send_buf,
-                                                          ccl::reduction::custom,
-                                                          false, // is_vector_buf
-                                                          false, // is_sycl_buf
-                                                          CCL_INVALID_PEER_RANK_IDX, // peer_rank
-                                                          {}, // hint_algo
-                                                          false); // is_scaleout
-
-    if (can_use_sycl_kernels(param)) {
-        if (comm->global_current_id > 0) {
-            CCL_THROW(
-                "broadcast is not supported for multi-group case of multithreaded communicator yet");
-        }
-        LOG_DEBUG(
-            "|CCL_SYCL| broadcast selects sycl-kernels count: ", count, ", datatype: ", dtype);
-
-        ccl_stream* op_stream = const_cast<ccl_stream*>(stream);
-        auto q = op_stream->get_native_stream();
-        auto dummy_unused_attr = ccl::create_operation_attr<ccl::broadcast_attr>();
-        collective = [=, &q, &deps]() -> ccl::event {
-            bool done = false;
-            ccl::event ccl_event = ccl::broadcast_sycl(q,
-                                                       send_buf,
-                                                       recv_buf,
-                                                       count,
-                                                       dtype,
-                                                       root,
-                                                       comm,
-                                                       op_stream,
-                                                       dummy_unused_attr,
-                                                       deps,
-                                                       done);
-            if (done) {
-                if (ccl::global_data::env().enable_op_sync) {
-                    ccl_event.wait();
-                }
-                return ccl_event;
-            }
-            return collective();
-        };
-    }
-#endif // CCL_ENABLE_SYCL && CCL_ENABLE_ZE
     ccl_request* req{};
     ccl::event event = std::unique_ptr<ccl::event_impl>(
         new ccl::host_event_impl(req, group_impl::is_group_active));
@@ -1871,9 +1645,6 @@ ccl::event ccl_broadcast(void* send_buf,
     else {
         event = collective();
     }
-#if defined(CCL_ENABLE_PROFILING)
-    profiler_record_comm_event_exit(comm->rank(), comm_event_session);
-#endif
     return event;
 }
 
@@ -1886,9 +1657,6 @@ ccl_request* ccl_broadcast_impl(void* send_buf,
                                 ccl_comm* comm,
                                 const ccl_stream* stream,
                                 const std::vector<ccl::event>& deps) {
-    CCL_THROW_RECORDING(stream,
-                        "|CCL_SYCL| sched algorithms do not support sycl_graph recording, "
-                        "please use sycl_algorithms");
     ccl_coll_param param = ccl_coll_param::create_broadcast_param(
         send_buf, recv_buf, count, dtype, root, attr, comm, stream, deps);
 
@@ -1907,12 +1675,6 @@ ccl::event ccl_reduce(const void* send_buf,
                       ccl_comm* comm,
                       const ccl_stream* stream,
                       const std::vector<ccl::event>& deps) {
-#if defined(CCL_ENABLE_PROFILING)
-    comm_session comm_event_session;
-    profiler_record_comm_event_enter(comm, "reduce", reduction, dtype, count, comm_event_session);
-#endif
-
-    CCL_THROW_RECORDING(stream, "|CCL_SYCL| ccl_reduce does not support sycl_graph recording");
     auto collective =
         [send_buf, recv_buf, count, dtype, reduction, root, attr, comm, stream, &deps]()
         -> ccl::event {
@@ -1935,9 +1697,6 @@ ccl::event ccl_reduce(const void* send_buf,
     else {
         event = collective();
     }
-#if defined(CCL_ENABLE_PROFILING)
-    profiler_record_comm_event_exit(comm->rank(), comm_event_session);
-#endif
     return event;
 }
 
@@ -1951,9 +1710,6 @@ ccl_request* ccl_reduce_impl(const void* send_buf,
                              ccl_comm* comm,
                              const ccl_stream* stream,
                              const std::vector<ccl::event>& deps) {
-    CCL_THROW_RECORDING(stream,
-                        "|CCL_SYCL| sched algorithms do not support sycl_graph recording, "
-                        "please use sycl_algorithms");
     ccl_coll_param param = ccl_coll_param::create_reduce_param(
         send_buf, recv_buf, count, dtype, reduction, root, attr, comm, stream, deps);
 
@@ -1971,12 +1727,6 @@ ccl::event ccl_reduce_scatter(const void* send_buf,
                               ccl_comm* comm,
                               const ccl_stream* stream,
                               const std::vector<ccl::event>& deps) {
-#if defined(CCL_ENABLE_PROFILING)
-    comm_session comm_event_session;
-    profiler_record_comm_event_enter(
-        comm, "reduce_scatter", reduction, dtype, recv_count, comm_event_session);
-#endif
-
     std::function<ccl::event()> collective =
         [send_buf, recv_buf, recv_count, dtype, reduction, attr, comm, stream, &deps]()
         -> ccl::event {
@@ -1998,6 +1748,10 @@ ccl::event ccl_reduce_scatter(const void* send_buf,
                                                           {}, // hint_algo
                                                           false); // is_scaleout
     if (can_use_sycl_kernels(param)) {
+        if (comm->is_multi_thread_instance() == true) {
+            CCL_THROW(
+                "|CCL_SYCL| reduce_scatter is not supported for multithreaded communicator yet");
+        }
         LOG_DEBUG("|CCL_SYCL| reduce_scatter selects sycl-kernels recv_count: ",
                   recv_count,
                   ", datatype: ",
@@ -2043,9 +1797,6 @@ ccl::event ccl_reduce_scatter(const void* send_buf,
     else {
         event = collective();
     }
-#if defined(CCL_ENABLE_PROFILING)
-    profiler_record_comm_event_exit(comm->rank(), comm_event_session);
-#endif
     return event;
 }
 
@@ -2058,9 +1809,6 @@ ccl_request* ccl_reduce_scatter_impl(const void* send_buf,
                                      ccl_comm* comm,
                                      const ccl_stream* stream,
                                      const std::vector<ccl::event>& deps) {
-    CCL_THROW_RECORDING(stream,
-                        "|CCL_SYCL| sched algorithms do not support sycl_graph recording, "
-                        "please use sycl_algorithms");
     ccl_coll_param param = ccl_coll_param::create_reduce_scatter_param(
         send_buf, recv_buf, recv_count, dtype, reduction, attr, comm, stream, deps);
 
@@ -2078,13 +1826,6 @@ ccl::event ccl_recv(void* recv_buf,
                     ccl_comm* comm,
                     const ccl_stream* stream,
                     const std::vector<ccl::event>& deps) {
-#if defined(CCL_ENABLE_PROFILING)
-    comm_session comm_event_session;
-    profiler_record_comm_event_enter(
-        comm, "recv", ccl::reduction::none, dtype, count, comm_event_session);
-#endif
-
-    CCL_THROW_RECORDING(stream, "|CCL_SYCL| ccl_recv does not support sycl_graph recording");
     std::function<ccl::event()> recv_operation =
         [recv_buf, count, dtype, peer, attr, comm, stream, &deps]() -> ccl::event {
         auto req = ccl_recv_impl(recv_buf, count, dtype, peer, attr, comm, stream, deps);
@@ -2105,31 +1846,34 @@ ccl::event ccl_recv(void* recv_buf,
                                                           {}, // hint_algo
                                                           false); // is_scaleout
     if (can_use_sycl_kernels(param)) {
-        LOG_DEBUG(
-            "|CCL_SYCL| recv selects sycl-kernels recv_count: ", count, ", datatype: ", dtype);
-        ccl_stream* op_stream = const_cast<ccl_stream*>(stream);
-        auto q = op_stream->get_native_stream();
-        auto dummy_unused_attr = ccl::create_operation_attr<ccl::pt2pt_attr>();
-        recv_operation = [=, &q, &deps]() -> ccl::event {
-            bool done = false;
-            ccl::event ccl_event = recv_sycl(q,
-                                             recv_buf,
-                                             count,
-                                             dtype,
-                                             peer,
-                                             comm,
-                                             const_cast<ccl_stream*>(stream),
-                                             dummy_unused_attr,
-                                             deps,
-                                             done);
-            if (done) {
-                if (ccl::global_data::env().enable_op_sync) {
-                    ccl_event.wait();
+        if (!group_impl::is_group_active) {
+            LOG_DEBUG(
+                "|CCL_SYCL| recv selects sycl-kernels recv_count: ", count, ", datatype: ", dtype);
+            ccl_stream* op_stream = const_cast<ccl_stream*>(stream);
+            auto q = op_stream->get_native_stream();
+            auto dummy_unused_attr = ccl::create_operation_attr<ccl::pt2pt_attr>();
+
+            recv_operation = [=, &q, &deps]() -> ccl::event {
+                bool done = false;
+                ccl::event ccl_event = recv_sycl(q,
+                                                 recv_buf,
+                                                 count,
+                                                 dtype,
+                                                 peer,
+                                                 comm,
+                                                 const_cast<ccl_stream*>(stream),
+                                                 dummy_unused_attr,
+                                                 deps,
+                                                 done);
+                if (done) {
+                    if (ccl::global_data::env().enable_op_sync) {
+                        ccl_event.wait();
+                    }
+                    return ccl_event;
                 }
-                return ccl_event;
-            }
-            return recv_operation();
-        };
+                return recv_operation();
+            };
+        }
     }
 #endif // CCL_ENABLE_SYCL && CCL_ENABLE_ZE
     ccl_request* req{};
@@ -2147,9 +1891,6 @@ ccl::event ccl_recv(void* recv_buf,
     else {
         event = recv_operation();
     }
-#if defined(CCL_ENABLE_PROFILING)
-    profiler_record_comm_event_exit(comm->rank(), comm_event_session);
-#endif
     return event;
 }
 
@@ -2161,9 +1902,6 @@ ccl_request* ccl_recv_impl(void* recv_buf,
                            ccl_comm* comm,
                            const ccl_stream* stream,
                            const std::vector<ccl::event>& deps) {
-    CCL_THROW_RECORDING(stream,
-                        "|CCL_SYCL| sched algorithms do not support sycl_graph recording, "
-                        "please use sycl_algorithms");
     ccl_coll_param param = ccl_coll_param::create_recv_param(
         recv_buf, recv_count, dtype, peer_rank, attr, comm, stream, deps);
 
@@ -2182,13 +1920,6 @@ ccl::event ccl_send(const void* send_buf,
                     ccl_comm* comm,
                     const ccl_stream* stream,
                     const std::vector<ccl::event>& deps) {
-#if defined(CCL_ENABLE_PROFILING)
-    comm_session comm_event_session;
-    profiler_record_comm_event_enter(
-        comm, "send", ccl::reduction::none, dtype, send_count, comm_event_session);
-#endif
-
-    CCL_THROW_RECORDING(stream, "|CCL_SYCL| ccl_send does not support sycl_graph recording");
     std::function<ccl::event()> send_operation =
         [send_buf, send_count, dtype, peer_rank, attr, comm, stream, &deps]() -> ccl::event {
         auto req = ccl_send_impl(send_buf, send_count, dtype, peer_rank, attr, comm, stream, deps);
@@ -2208,32 +1939,37 @@ ccl::event ccl_send(const void* send_buf,
                                                           {}, // hint_algo
                                                           false); // is_scaleout
     if (can_use_sycl_kernels(param)) {
-        LOG_DEBUG(
-            "|CCL_SYCL| send selects sycl-kernels send_count: ", send_count, ", datatype: ", dtype);
+        if (!group_impl::is_group_active) {
+            LOG_DEBUG("|CCL_SYCL| send selects sycl-kernels send_count: ",
+                      send_count,
+                      ", datatype: ",
+                      dtype);
 
-        ccl_stream* op_stream = const_cast<ccl_stream*>(stream);
-        auto q = op_stream->get_native_stream();
-        auto dummy_unused_attr = ccl::create_operation_attr<ccl::pt2pt_attr>();
-        send_operation = [=, &q, &deps]() -> ccl::event {
-            bool done = false;
-            ccl::event ccl_event = send_sycl(q,
-                                             send_buf,
-                                             send_count,
-                                             dtype,
-                                             peer_rank,
-                                             comm,
-                                             const_cast<ccl_stream*>(stream),
-                                             dummy_unused_attr,
-                                             deps,
-                                             done);
-            if (done) {
-                if (ccl::global_data::env().enable_op_sync) {
-                    ccl_event.wait();
+            ccl_stream* op_stream = const_cast<ccl_stream*>(stream);
+            auto q = op_stream->get_native_stream();
+
+            auto dummy_unused_attr = ccl::create_operation_attr<ccl::pt2pt_attr>();
+            send_operation = [=, &q, &deps]() -> ccl::event {
+                bool done = false;
+                ccl::event ccl_event = send_sycl(q,
+                                                 send_buf,
+                                                 send_count,
+                                                 dtype,
+                                                 peer_rank,
+                                                 comm,
+                                                 const_cast<ccl_stream*>(stream),
+                                                 dummy_unused_attr,
+                                                 deps,
+                                                 done);
+                if (done) {
+                    if (ccl::global_data::env().enable_op_sync) {
+                        ccl_event.wait();
+                    }
+                    return ccl_event;
                 }
-                return ccl_event;
-            }
-            return send_operation();
-        };
+                return send_operation();
+            };
+        }
     }
 #endif // CCL_ENABLE_SYCL && CCL_ENABLE_ZE
     ccl_request* req{};
@@ -2251,9 +1987,6 @@ ccl::event ccl_send(const void* send_buf,
     else {
         event = send_operation();
     }
-#if defined(CCL_ENABLE_PROFILING)
-    profiler_record_comm_event_exit(comm->rank(), comm_event_session);
-#endif
     return event;
 }
 
@@ -2265,9 +1998,6 @@ ccl_request* ccl_send_impl(const void* send_buf,
                            ccl_comm* comm,
                            const ccl_stream* stream,
                            const std::vector<ccl::event>& deps) {
-    CCL_THROW_RECORDING(stream,
-                        "|CCL_SYCL| sched algorithms do not support sycl_graph recording, "
-                        "please use sycl_algorithms");
     ccl_coll_param param = ccl_coll_param::create_send_param(
         send_buf, send_count, dtype, peer_rank, attr, comm, stream, deps);
 

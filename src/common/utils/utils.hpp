@@ -204,7 +204,7 @@ std::string vec_to_string(Container& elems) {
 
     size_t idx = 0;
     std::ostringstream ss;
-    for (const auto& elem : elems) {
+    for (auto elem : elems) {
         ss << elem;
         idx++;
         if (idx < elems.size()) {

@@ -14,7 +14,6 @@
  limitations under the License.
 */
 #include "coll/algorithms/utils/sycl_coll_base.hpp"
-#include "coll/algorithms/utils/sycl_selection.hpp"
 
 #if defined(CCL_ENABLE_ZE) || defined(CCL_ENABLE_SYCL)
 #include "coll/algorithms/allreduce/sycl/allreduce_sycl.hpp"
@@ -51,17 +50,16 @@ ccl::event allreduce_sycl_single_node(sycl::queue& q,
     if (world == 1) {
         sycl::event sycl_e;
         std::vector<sycl::event> dep_events = get_sycl_events(deps);
-        auto sycl_q = global_stream->get_native_stream();
         if (send_buf != recv_buf) {
             LOG_DEBUG("single rank: out-of-place case, coll: allreduce");
-            sycl_e = sycl_q.submit([=](sycl::handler& h) {
+            sycl_e = q.submit([=](sycl::handler& h) {
                 h.depends_on(dep_events);
                 h.memcpy(recv_buf, send_buf, count * ccl_dtype.size());
             });
         }
         else {
             LOG_DEBUG("single rank: inplace case, coll: allreduce");
-            sycl_e = submit_wait_on_events(sycl_q, dep_events);
+            sycl_e = submit_wait_on_events(q, dep_events);
         }
         return ccl::event::create_from_native(sycl_e);
     }
@@ -76,7 +74,7 @@ ccl::event allreduce_sycl_single_node(sycl::queue& q,
 
     // for ARC GPUs to do ring LL256
     if (is_arc_card(ccl::ze::get_device_family(global_stream->get_ze_device()))) {
-        if (!is_aligned(send_buf, recv_buf, count, 0, 4)) {
+        if (!is_aligned(send_buf, recv_buf, 0, 4)) {
             done = false;
             return e;
         }
@@ -152,7 +150,7 @@ ccl::event allreduce_sycl_single_node(sycl::queue& q,
         ccl::profile::itt::task_begin("allreduce_small", "send_size", count * ccl_dtype.size());
 #endif // CCL_ENABLE_ITT
         LOG_DEBUG("|CCL_SYCL| allreduce selects small kernel, count:", count, " datatype: ", dtype);
-        e = run_allreduce_small(dtype, q, send_buf, recv_buf, count, reduction, deps, done);
+        e = run_allreduce_small(dtype, q, send_buf, recv_buf, count, deps, done);
         LOG_DEBUG("|CCL_SYCL| allreduce selects small kernel, count:",
                   count,
                   " datatype: ",
@@ -175,7 +173,7 @@ ccl::event allreduce_sycl_single_node(sycl::queue& q,
 #endif // CCL_ENABLE_ITT
         LOG_DEBUG(
             "|CCL_SYCL| allreduce selects medium kernel, count:", count, " datatype: ", dtype);
-        e = run_allreduce_medium(dtype, q, send_buf, recv_buf, count, reduction, deps, done);
+        e = run_allreduce_medium(dtype, q, send_buf, recv_buf, count, deps, done);
         LOG_DEBUG("|CCL_SYCL| allreduce selects medium kernel, count:",
                   count,
                   " datatype: ",
@@ -192,7 +190,7 @@ ccl::event allreduce_sycl_single_node(sycl::queue& q,
         ccl::profile::itt::task_begin("allreduce_large", "send_size", count * ccl_dtype.size());
 #endif // CCL_ENABLE_ITT
         LOG_DEBUG("|CCL_SYCL| allreduce selects large kernel, count:", count, " datatype: ", dtype);
-        e = run_allreduce_large(dtype, q, send_buf, recv_buf, count, reduction, deps, done);
+        e = run_allreduce_large(dtype, q, send_buf, recv_buf, count, deps, done);
         LOG_DEBUG("|CCL_SYCL| allreduce selects large kernel, count:",
                   count,
                   " datatype: ",
@@ -209,7 +207,7 @@ ccl::event allreduce_sycl_single_node(sycl::queue& q,
     return e;
 }
 
-static bool do_fallback_to_scheduler(size_t size) {
+bool do_fallback_to_scheduler(size_t size) {
     bool is_above_threshold = size > ccl::global_data::env().sycl_allreduce_scaleout_threshold;
     bool exception_cases = ccl::global_data::env().sycl_esimd ||
                            (ccl::global_data::env().atl_transport == ccl_atl_ofi &&
@@ -272,8 +270,6 @@ ccl::event allreduce_sycl_multi_node_rs_phase(sycl::queue& q,
 #endif // CCL_ENABLE_ITT
     }
     else {
-        sycl_coll_scaleup_attr coll_attr;
-        coll_attr.force_use_tmp = true;
         ev = reduce_scatter_sycl_single_node(q,
                                              send_buf,
                                              recv_buf,
@@ -283,8 +279,7 @@ ccl::event allreduce_sycl_multi_node_rs_phase(sycl::queue& q,
                                              node_comm,
                                              global_stream,
                                              deps,
-                                             done,
-                                             coll_attr);
+                                             done);
         if (!done) {
             LOG_INFO("allreduce_sycl reduce_scatter was not done -- falling back");
             // fallback
@@ -361,9 +356,6 @@ ccl::event allreduce_sycl_multi_node_ag_phase(sycl::queue& q,
     else {
         std::vector<size_t> recv_counts(node_comm->size(), send_count);
 
-        sycl_coll_scaleup_attr coll_attr;
-        coll_attr.wait_on_deps = true;
-        coll_attr.force_use_tmp = true;
         ev = allgather_sycl_single_node(q,
                                         send_buf,
                                         send_count,
@@ -375,7 +367,7 @@ ccl::event allreduce_sycl_multi_node_ag_phase(sycl::queue& q,
                                         global_stream,
                                         deps,
                                         done,
-                                        coll_attr);
+                                        true /* wait_on_deps */);
         if (!done) {
             // fallback
             LOG_INFO("allreduce_sycl allgatherv was not done -- falling back");

@@ -344,7 +344,7 @@ void mem_handle_cache::make_clean(size_t limit) {
         cache_list.pop_back();
         if (!limit_warning_printed && limit != 0) {
             LOG_WARN(
-                "Receiver cache limit is reached: mem_handle_cache size: ",
+                "mem handle cache limit is reached: mem_handle_cache size: ",
                 cache.size(),
                 ", limit: ",
                 limit,
@@ -543,16 +543,6 @@ void ipc_handle_cache::push(ze_context_handle_t context,
     static std::atomic<size_t> global_handle_id = 0;
 
     while (cache.size() >= (size_t)global_data::env().ze_cache_get_ipc_handles_threshold) {
-        LOG_WARN(
-            "Sender cache limit is reached: cache size: ",
-            cache.size(),
-            ", limit: ",
-            global_data::env().ze_cache_get_ipc_handles_threshold,
-            ", it will clear older elements from the cache."
-            " The app can crash in a L0 call due to a L0 issue. There are three possible work-arounds:"
-            "\n1) Run with \"export ZE_ENABLE_TRACING_LAYER=1\". This may have a performance impact."
-            "\n2) Increase the cache size 'CCL_ZE_CACHE_GET_IPC_HANDLES_THRESHOLD=value'. The application may run out of memory."
-            "\n3) Run with \"export CCL_ZE_CLOSE_IPC_WA=1\". This may leak L0 internal graph objects");
         auto lru_key = lru_order.back();
         auto lru_iter = cache.find(lru_key);
 
@@ -585,27 +575,6 @@ void ipc_handle_cache::push(ze_context_handle_t context,
 void ipc_handle_cache::update_lru_order(key_t key) {
     lru_order.remove(key);
     lru_order.push_front(key);
-}
-
-void ipc_handle_cache::evict(void* ptr) {
-    CCL_THROW_IF_NOT(ptr);
-
-    std::lock_guard<std::mutex> lock(mutex);
-
-    auto key_value = cache.find(ptr);
-    if (key_value != cache.end()) {
-        value_t& value = key_value->second;
-        ze_context_handle_t context = ccl::global_data::get().ze_data->contexts[0];
-        ze_device_handle_t device;
-        ze_memory_allocation_properties_t alloc_props = ccl::ze::default_alloc_props;
-        ZE_CALL(zeMemGetAllocProperties, (context, ptr, &alloc_props, &device));
-
-        if (value.mem_id == alloc_props.id) {
-            LOG_DEBUG("ipc_handle is evicted in the cache", ptr);
-            cache.erase(key_value);
-            lru_order.remove(ptr);
-        }
-    }
 }
 
 // cache

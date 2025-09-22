@@ -24,8 +24,6 @@
 
 #include <ze_api.h>
 #include <zes_api.h>
-#include "layers/zel_tracing_api.h"
-#include "layers/zel_tracing_register_cb.h"
 
 namespace ccl {
 
@@ -112,9 +110,6 @@ typedef struct ze_lib_ops {
     decltype(zeFabricEdgeGetExp) *zeFabricEdgeGetExp;
     decltype(zeFabricEdgeGetPropertiesExp) *zeFabricEdgeGetPropertiesExp;
     decltype(zeDeviceGetFabricVertexExp) *zeDeviceGetFabricVertexExp;
-    decltype(zelTracerCreate) *zelTracerCreate;
-    decltype(zelTracerMemFreeRegisterCallback) *zelTracerMemFreeRegisterCallback;
-    decltype(zelTracerSetEnabled) *zelTracerSetEnabled;
 } ze_lib_ops_t;
 
 static std::vector<std::string> ze_fn_names = {
@@ -200,9 +195,6 @@ static std::vector<std::string> ze_fn_names = {
     "zeFabricEdgeGetExp",
     "zeFabricEdgeGetPropertiesExp",
     "zeDeviceGetFabricVertexExp",
-    "zelTracerCreate",
-    "zelTracerMemFreeRegisterCallback",
-    "zelTracerSetEnabled",
 };
 
 extern ccl::ze_lib_ops_t ze_lib_ops;
@@ -292,9 +284,6 @@ extern ccl::ze_lib_ops_t ze_lib_ops;
 #define zeFabricEdgeGetExp                  ccl::ze_lib_ops.zeFabricEdgeGetExp
 #define zeFabricEdgeGetPropertiesExp        ccl::ze_lib_ops.zeFabricEdgeGetPropertiesExp
 #define zeDeviceGetFabricVertexExp          ccl::ze_lib_ops.zeDeviceGetFabricVertexExp
-#define zelTracerCreate                     ccl::ze_lib_ops.zelTracerCreate
-#define zelTracerMemFreeRegisterCallback    ccl::ze_lib_ops.zelTracerMemFreeRegisterCallback
-#define zelTracerSetEnabled                 ccl::ze_lib_ops.zelTracerSetEnabled
 
 bool ze_api_init();
 void ze_api_fini();

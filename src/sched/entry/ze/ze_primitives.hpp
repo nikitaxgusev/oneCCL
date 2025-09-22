@@ -221,17 +221,13 @@ ze_ipc_mem_handle_t get_handle_from_fd(int fd);
 
 device_family get_device_family(ze_device_handle_t device);
 
-#ifdef ZE_PCI_PROPERTIES_EXT_NAME
-bool is_same_pci_addr(const ze_pci_address_ext_t& addr1, const ze_pci_address_ext_t& addr2);
-#endif // ZE_PCI_PROPERTIES_EXT_NAME
+bool is_same_pci_addr(const zes_pci_address_t& addr1, const zes_pci_address_t& addr2);
 bool is_same_dev_uuid(const ze_device_uuid_t& uuid1, const ze_device_uuid_t& uuid2);
 bool is_same_fabric_port(const zes_fabric_port_id_t& port1, const zes_fabric_port_id_t& port2);
 
-#ifdef ZE_PCI_PROPERTIES_EXT_NAME
 struct pci_address_comparator {
-    bool operator()(const ze_pci_address_ext_t& a, const ze_pci_address_ext_t& b) const;
+    bool operator()(const zes_pci_address_t& a, const zes_pci_address_t& b) const;
 };
-#endif // ZE_PCI_PROPERTIES_EXT_NAME
 
 struct fabric_port_comparator {
     bool operator()(const zes_fabric_port_id_t& a, const zes_fabric_port_id_t& b) const;
@@ -246,9 +242,7 @@ std::string to_string(const ze_kernel_args_t& kernel_args);
 std::string to_string(ze_device_property_flag_t flag);
 std::string to_string(ze_command_queue_group_property_flag_t flag);
 std::string to_string(const ze_command_queue_group_properties_t& props);
-#ifdef ZE_PCI_PROPERTIES_EXT_NAME
-std::string to_string(const ze_pci_address_ext_t& addr);
-#endif // ZE_PCI_PROPERTIES_EXT_NAME
+std::string to_string(const zes_pci_address_t& addr);
 std::string to_string(const ze_device_uuid_t& uuid);
 std::string to_string(const zes_fabric_port_id_t& port);
 std::string to_string(zes_fabric_port_status_t status);

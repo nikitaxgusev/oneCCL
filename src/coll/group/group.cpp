@@ -53,8 +53,9 @@ void group_impl::end() {
         }
         first_group_op = false; // needed in case operation_storage is empty
         // wait() is needed to avoid oneCCL destruction prior to device tasks completion
-        event.wait();
-
+        if (event) {
+            event.wait();
+        }
         if (post_processing_steps.size()) {
 #ifdef CCL_ENABLE_SYCL
             sycl_queue

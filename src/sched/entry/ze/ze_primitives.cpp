@@ -408,8 +408,7 @@ device_family get_device_family(ze_device_handle_t device) {
     }
 }
 
-#ifdef ZE_PCI_PROPERTIES_EXT_NAME
-bool is_same_pci_addr(const ze_pci_address_ext_t& addr1, const ze_pci_address_ext_t& addr2) {
+bool is_same_pci_addr(const zes_pci_address_t& addr1, const zes_pci_address_t& addr2) {
     bool result = true;
     if (!(addr1.domain == addr2.domain && addr1.bus == addr2.bus && addr1.device == addr2.device &&
           addr1.function == addr2.function)) {
@@ -422,7 +421,6 @@ bool is_same_pci_addr(const ze_pci_address_ext_t& addr1, const ze_pci_address_ex
     }
     return result;
 }
-#endif // ZE_PCI_PROPERTIES_EXT_NAME
 
 bool is_same_dev_uuid(const ze_device_uuid_t& uuid1, const ze_device_uuid_t& uuid2) {
     bool result = true;
@@ -452,9 +450,8 @@ bool is_same_fabric_port(const zes_fabric_port_id_t& port1, const zes_fabric_por
     return result;
 }
 
-#ifdef ZE_PCI_PROPERTIES_EXT_NAME
-bool pci_address_comparator::operator()(const ze_pci_address_ext_t& a,
-                                        const ze_pci_address_ext_t& b) const {
+bool pci_address_comparator::operator()(const zes_pci_address_t& a,
+                                        const zes_pci_address_t& b) const {
     if (a.domain == b.domain) {
         if (a.bus == b.bus) {
             if (a.device == b.device) {
@@ -477,7 +474,6 @@ bool pci_address_comparator::operator()(const ze_pci_address_ext_t& a,
         return (a.domain < b.domain);
     }
 }
-#endif // ZE_PCI_PROPERTIES_EXT_NAME
 
 bool fabric_port_comparator::operator()(const zes_fabric_port_id_t& a,
                                         const zes_fabric_port_id_t& b) const {
@@ -662,14 +658,12 @@ std::string to_string(const ze_command_queue_group_properties_t& props) {
     return ss.str();
 }
 
-#ifdef ZE_PCI_PROPERTIES_EXT_NAME
-std::string to_string(const ze_pci_address_ext_t& addr) {
+std::string to_string(const zes_pci_address_t& addr) {
     std::stringstream ss;
     ss << "{ " << addr.domain << ", " << addr.bus << ", " << addr.device << ", " << addr.function
        << " }";
     return ss.str();
 }
-#endif // ZE_PCI_PROPERTIES_EXT_NAME
 
 std::string to_string(const ze_device_uuid_t& uuid) {
     std::string str{};

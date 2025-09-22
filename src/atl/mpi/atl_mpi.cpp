@@ -82,10 +82,6 @@ atl_status_t atl_mpi::init(int* argc,
         goto err_init;
     }
 
-    int global_idx;
-    MPI_Comm_rank(MPI_COMM_WORLD, &global_idx);
-    ccl_logger::set_global_idx(global_idx);
-
     ctx.ep_count = attr->in.ep_count;
 
     char* progress_mode_env;

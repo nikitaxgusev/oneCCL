@@ -18,22 +18,8 @@
 
 #include <sys/prctl.h>
 #include <sys/types.h>
-
 namespace ccl {
 namespace ze {
-
-static zel_tracer_handle_t free_tracer;
-
-// zeMemFree callback function
-static void ze_free_cb(ze_mem_free_params_t* tracer_params,
-                       ze_result_t result,
-                       void* trace_user_data,
-                       void** tracer_instance_user_data) {
-    LOG_DEBUG("GPU memory being freed: ",
-              static_cast<size_t>(reinterpret_cast<uintptr_t>(*tracer_params->pptr)));
-    global_data::get().ze_data->cache->evict(*tracer_params->pptr);
-    *tracer_instance_user_data = NULL;
-}
 
 device_info::device_info(ze_device_handle_t dev, uint32_t parent_idx)
         : device(dev),
@@ -132,8 +118,6 @@ global_data_desc::global_data_desc() {
 
     init_external_pointer_registration();
 
-    init_tracing();
-
 #ifdef CCL_ENABLE_UMF
     if (ccl::global_data::env().umf_enable) {
         init_umf_mem_pools(devices);
@@ -141,20 +125,6 @@ global_data_desc::global_data_desc() {
 #endif // CCL_ENABLE_UMF
 
     LOG_INFO("initialized level-zero");
-}
-
-void global_data_desc::init_tracing() {
-    char* s = getenv("ZE_ENABLE_TRACING_LAYER");
-    if (s && strncmp(s, "0", 1) != 0) {
-        zel_tracer_desc_t tracer_desc = { ZEL_STRUCTURE_TYPE_TRACER_DESC, NULL, NULL };
-        ze_result_t ret = zelTracerCreate(&tracer_desc, &free_tracer);
-        if (ret == ZE_RESULT_SUCCESS) {
-            ZE_CALL(zelTracerMemFreeRegisterCallback,
-                    (free_tracer, ZEL_REGISTER_PROLOGUE, ze_free_cb));
-            ZE_CALL(zelTracerSetEnabled, (free_tracer, true));
-            LOG_INFO("ZE loader tracing is enabled");
-        }
-    }
 }
 
 global_data_desc::~global_data_desc() {

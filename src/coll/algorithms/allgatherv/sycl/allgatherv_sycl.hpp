@@ -15,8 +15,6 @@
 */
 #pragma once
 
-#include "coll/algorithms/utils/sycl_selection.hpp"
-
 #define SYCL_ALLGATHERV_FUNCTIONS(MSGSIZE) \
     void init_allgatherv_##MSGSIZE(ccl::datatype dtype, \
                                    sycl::queue& queue, \
@@ -49,7 +47,7 @@ ccl::event allgather_sycl_single_node(sycl::queue& q,
                                       ccl_stream* global_stream,
                                       const vector_class<event>& deps,
                                       bool& done,
-                                      sycl_coll_scaleup_attr coll_attr = {});
+                                      bool wait_on_deps = false);
 
 ccl::event allgather_sycl(sycl::queue& q,
                           const void* send_buf,
@@ -84,7 +82,7 @@ ccl::event allgatherv_large(const void* send_buf,
                             ccl_comm* comm,
                             ccl_stream* global_stream,
                             const ccl::vector_class<ccl::event>& deps,
-                            sycl_coll_scaleup_attr coll_attr = {});
+                            bool wait_on_deps = false);
 
 // ring with LL protocols
 ccl::event allgatherv_ll_ring(const void* send_buf,
@@ -108,7 +106,7 @@ ccl::event allgatherv_scaleout_sycl(sycl::queue& q,
                                     const ccl::vector_class<ccl::event>& deps,
                                     bool original_deps,
                                     bool& done,
-                                    sycl_allgatherv_tune_attr tune_attr,
+                                    bool direct,
                                     bool is_cpu_buffers = false);
 
 ccl::event allgatherv_scaleout_sycl_direct(sycl::queue& q,

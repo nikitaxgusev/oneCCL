@@ -67,8 +67,6 @@ private:
     typedef ze_result_t (*pFnzexDriverReleaseImportedPointer)(ze_driver_handle_t, void*);
     pFnzexDriverImportExternalPointer zexDriverImportExternalPointer = nullptr;
     pFnzexDriverReleaseImportedPointer zexDriverReleaseImportedPointer = nullptr;
-
-    void init_tracing();
 };
 
 } // namespace ze

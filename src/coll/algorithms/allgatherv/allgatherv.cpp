@@ -715,7 +715,7 @@ ccl::status ccl_coll_build_topo_allgatherv_fill(ccl_sched* sched,
             }
         }
         add_sched_barrier_for_parallel_copies();
-        ccl::add_comm_barrier(sched, node_comm, wait_events, out_event);
+        ccl::add_comm_barrier(sched, pair_comm, wait_events, out_event);
 
         return ccl::status::success;
     }
